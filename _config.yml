@@ -1,5 +1,5 @@
 layout: default
 title: "Brain Glutamate, Disease Burden, and Neuropsychiatric Symptoms in Multiple Sclerosis: A Meta-Analysis"
-# logo: "./results/Figure_Main_Meta_Summary.png"
+logo: "./figures/Figure_Main_Meta_Summary.pdf"
 description: "Meta-analysis comparing glutamate concentrations between individuals with MS and HC to examine their relationship with tissue injury, physical disability, and psychiatric symptoms."
 theme: jekyll-theme-minimal
