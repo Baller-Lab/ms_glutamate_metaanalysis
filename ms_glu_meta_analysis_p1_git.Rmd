@@ -1,0 +1,334 @@
+---
+title: "ms_glu_meta_analysis_p1_git"
+output: html_document
+date: "2026-10-19"
+---
+### MS-GLUTAMATE META-ANALYSIS: STEP 1 ###
+
+"Brain glutamate, disease burden, and neuropsychiatric symptoms in multiple sclerosis: a meta-analysis"
+
+
+This is the first script (out of two), to run the statistical analyses for the ms-glutamate meta-analysis project. This script runs the meta-analysis of all metabolites combined, as well separated by glutamate and glutamate+glutamine (referred to as glx throughout the script). 
+
+Pre: 
+- Update base_dir to your own local environment. 
+- Ensure that all packages (listed in stage 1: setup chunk) have been previously downloaded.
+- Have the extraction data "msglu_metaanalysis_extracted_data" downloaded and loaded into the appropriate folder.
+  - Data can be found on the github: ms_glutamate_metaanalysis/data/msglu_metaanalysis_extracted_data.xlsx
+  
+Post:
+- Meta-analysis results for all metabolites combined, glutamate, and glutamate+glutamine, to be used in script 2.
+
+<https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/> Citation:
+Harrer, M., Cuijpers, P., Furukawa, T.A., & Ebert, D.D. (2021). Doing Meta-Analysis with R: A Hands-On Guide. Boca Raton, FL and London: Chapman & Hall/CRC Press. ISBN 978-0-367-61007-4.
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# -----------------------------------------------------------------------------
+### Stage 1: Set up packages and paths
+#### Setup
+```{r setup-packages}
+# Set paths
+base_dir   <- "/Users/elenacooper/Desktop/MS_Meta_Analysis" # update this path to reflect your local environment
+results_dir <- file.path(base_dir, "final_results")
+
+# Load packages
+load_packages <- function(packages) {
+  for (pkg in packages) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      install.packages(pkg)
+    }
+    library(pkg, character.only = TRUE)
+  }
+}
+
+packages_needed <- c(
+  "readxl", "writexl", "tidyverse", "grid", "gridExtra",
+  "ggpattern", "knitr", "esc", "metafor", "meta", "dmetar", "DeLuciatoR", "RColorBrewer"
+)
+load_packages(packages_needed)
+
+```
+
+# -----------------------------------------------------------------------------
+## Stage 2: Calculate effect sizes and run overall meta-analysis - If already calculated, SKIP to Stage 3 (Next script)
+Citations:
+<https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/effectsizecalculator.html>
+<https://www.rdocumentation.org/packages/esc/versions/0.5.1/topics/effect_sizes>
+
+### Import Data
+```{r}
+# All studies
+dataset_all <- read_excel(paste0(base_dir, "/Extraction/data/final_extraction_data_20260406.xlsx")) 
+
+# Only studies that report T-stats
+datasetT <- read_excel(paste0(base_dir, "/Extraction/data/final_extraction_data_20260406.xlsx"), 2) 
+
+# Only studies that report P-Values
+datasetP <- read_excel(paste0(base_dir, "/Extraction/data/final_extraction_data_20260406.xlsx"), 3) 
+
+```
+
+### Reformat dataframes
+```{r}
+# Delete empty rows
+clean_empty_rows <- function(df) {
+  df <- df[!apply(is.na(df) | df == "", 1, all), ] 
+}
+dataset_all <- clean_empty_rows(dataset_all)
+datasetT <- clean_empty_rows(datasetT)
+datasetP <- clean_empty_rows(datasetP)
+
+# Select and convert columns to numeric
+num_cols <- c(
+  "Case_Mean", "Case_Std_Dev", "Case_Sex_F_n", "Control_Mean", "Control_Std_Dev", "Control_Sex_F_n", "Sex_%F", "Total_n_of_participants",
+  "EDSS_mean", "Mean_Disease_duration","Disease_duration_SD", "Mean_Case_Age", "Mean_Control_Age", "Echo_Time", "Repetition_Time",
+  "GM_Tissue_case_mean_pct", "GM_Tissue_case_SD_pct", "GM_Tissue_control_mean_pct", "GM_Tissue_control_SD_pct", "Med_Naive_Percent",
+  "WM_Tissue_case_mean_pct", "WM_Tissue_case_SD_pct", "WM_Tissue_control_mean_pct", "WM_Tissue_control_SD_pct", "CSF_case_mean_pct",
+  "CSF_case_SD_pct", "CSF_control_mean_pct", "CSF_control_SD_pct", "Mean_CRLB_Case_pct", "SD_CRLB_Case_pct", "Mean_CRLB_Control_pct",
+  "SD_CRLB_Control_pct", "CRLB_Thresh_pct", "Combined_Age_Mean", "Combined_Age_SD", "Case_Sex_%F", "Control_Sex_%F", 
+  "Percent_Med_at_Scan", "EDSS_median", "EDSS_min", "EDSS_max", "EDSS_sd", "Case_Sample_size", "Control_Sample_size"
+)
+
+dataset_all[num_cols] <- lapply(dataset_all[num_cols], as.numeric)
+
+# Create datasetM for studies with Means & SDs
+datasetM <- dataset_all %>%
+  filter(str_detect(stat_reported, regex("sd", ignore_case = TRUE))) %>%
+  select(Study_ID, Study, Case_Mean, Case_Std_Dev, Case_Sample_size, Control_Mean, Control_Std_Dev, Control_Sample_size)
+
+# Rename columns to match metafor package
+names(datasetM)[3:8] <- c("Me", "Se", "Ne", "Mc", "Sc", "Nc")
+
+# Format T and P statistic datasets
+names(datasetT)[3:4] <- c("NeT", "NcT")
+names(datasetP)[3:4] <- c("NeP", "NcP")
+
+# Format p-values
+datasetP <- datasetP %>%
+  mutate(
+    P_value = gsub("NS", "0.2", P_value) 
+  )
+
+datasetP <- datasetP %>%
+  mutate(
+    P_value = gsub("P<0.05", "0.05", P_value),
+    P_value = gsub("P<0.01", "0.01", P_value),
+    P_value = gsub("P<0.001", "0.001", P_value))
+
+datasetP <- datasetP %>%
+  mutate(
+P_value = as.numeric(P_value))
+
+# Format additional variables 
+dataset_all <- dataset_all %>%
+  mutate(
+    Med_Naive_YN = case_when(
+      Med_Naive_YN == "N" ~ "Not Med Naive",
+      Med_Naive_YN == "Y" ~ "Med Naive",
+      TRUE ~ Med_Naive_YN
+    ),
+    DMT = case_when(
+      DMT == "N" ~ "Not on DMT",
+      DMT == "Y" ~ "On DMT",
+      TRUE ~ DMT
+    )
+  )
+
+```
+
+### Calculate Effect Sizes
+#### Effect direction
+```{r}
+dataset_all <- dataset_all %>%
+  mutate(
+    # Only calculate if the row has Mean/SD data
+    is_mean_sd = str_detect(stat_reported, regex("sd", ignore_case = TRUE)),
+    
+    # Difference in Means (Case - Control)
+    `Difference in means` = if_else(is_mean_sd, 
+                                    Case_Mean - Control_Mean, 
+                                    NA_real_),
+    
+    # Effect Direction (1 for Case > Control, 0 otherwise)
+    `Effect Direction (case - control)` = if_else(`Difference in means` > 0, 1, 0),
+    
+    # Standard Error of the Difference
+    `DiM Std Err` = if_else(is_mean_sd,
+                            sqrt((Case_Std_Dev^2 / Case_Sample_size) + (Control_Std_Dev^2 / Control_Sample_size)), 
+                            NA_real_)
+  ) %>%
+  select(-is_mean_sd) 
+
+```
+
+#### Means and Standard Deviations (case - control) Effect Sizes
+```{r}
+# Calculate the Effect Sizes
+effect_size_results <- effect_sizes(datasetM, 
+                                    study = Study, 
+                                    grp1m = Me, 
+                                    grp1sd = Se, 
+                                    grp1n = Ne, 
+                                    grp2m = Mc, 
+                                    grp2sd = Sc, 
+                                    grp2n = Nc, 
+                                    fun = "esc_mean_sd", 
+                                    es.type = "d") 
+
+effect_size_clean <- effect_size_results %>%
+  select(study, es, se) %>%
+  rename(Study = study, SDM = es, `SDM Std Err` = se)
+
+dataset_all <- dataset_all %>%
+  left_join(effect_size_clean, by = "Study")
+
+```
+
+#### T-Statistics case - control, effect size + when case > control
+```{r}
+# Calculate Effect Sizes from T-statistics
+effect_size_t <- effect_sizes(datasetT, 
+                              study = Study, 
+                              grp1n = NeT, 
+                              grp2n = NcT, 
+                              t = T_value, 
+                              fun = "esc_t", 
+                              es.type = "d")
+
+effect_size_t_clean <- effect_size_t %>%
+  select(study, es, se) %>%
+  rename(Study = study, SDM_t = es, SE_t = se)
+
+dataset_all <- dataset_all %>%
+  left_join(effect_size_t_clean, by = "Study") %>%
+  mutate(
+    # If SDM is NA, replace it with the T-statistic result
+    SDM = coalesce(SDM, SDM_t),
+    `SDM Std Err` = coalesce(`SDM Std Err`, SE_t)
+  ) %>%
+  select(-SDM_t, -SE_t)
+
+# Effect Direction (1 = Case > Control)
+dataset_all <- dataset_all %>%
+  mutate(
+    `Effect Direction (case - control)` = case_when(
+      !is.na(T_value) & T_value > 0 ~ 1,
+      !is.na(T_value) & T_value <= 0 ~ 0,
+      TRUE ~ `Effect Direction (case - control)`
+    )
+  )
+
+```
+
+#### P-Values Effect Sizes
+```{r}
+# Calculate Effect Size from P-values
+effect_size_p <- effect_sizes(datasetP, 
+                              study = Study, 
+                              grp1n = NeP, 
+                              grp2n = NcP, 
+                              p = P_value, 
+                              fun = "esc_t", 
+                              es.type = "d")
+
+effect_size_p_clean <- effect_size_p %>%
+  rename(Study = study) %>%
+  left_join(datasetP %>% select(Study, P_value_effect_direction), by = "Study") %>%
+  mutate(
+    # Force negative if Control > Case, otherwise keep positive
+    es = if_else(P_value_effect_direction == "Control_greater_than_case", -abs(es), abs(es))
+  ) %>%
+  select(Study, es, se) %>%
+  rename(SDM_p = es, SE_p = se)
+
+dataset_all <- dataset_all %>%
+  left_join(effect_size_p_clean, by = "Study") %>%
+  mutate(
+    SDM = coalesce(SDM, SDM_p),
+    `SDM Std Err` = coalesce(`SDM Std Err`, SE_p)
+  ) %>%
+  select(-SDM_p, -SE_p)
+
+# Effect Direction (1 = Case > Control)
+dataset_all <- dataset_all %>%
+  mutate(
+    `Effect Direction (case - control)` = case_when(
+      !is.na(P_value_effect_direction) & P_value_effect_direction == "Control_greater_than_case" ~ 0,
+      !is.na(P_value_effect_direction) & P_value_effect_direction != "Control_greater_than_case" ~ 1,
+      TRUE ~ `Effect Direction (case - control)`
+    )
+  )
+
+```
+
+### Overall Meta-Analysis 
+```{r}
+####### OVERALL META-ANALYSIS ####### 
+
+# Clean dataset in accordance with the final inclusion and exclusion criteria
+dataset <- dataset_all %>%
+  filter(Use_in_analysis == "Y") %>%
+  filter(Sequence_MRSQ_Grouping != "EPSI_3D") %>%
+  filter(Imputed == "N")
+
+meta_overall <- metagen(
+    TE = SDM,             
+    seTE = `SDM Std Err`, 
+    data = dataset, 
+    studlab = Study,
+    common = FALSE,        
+    random = TRUE,
+    method.tau = "DL",     
+    method.random.ci = "classic",
+    prediction = TRUE,
+    sm = "SMD"
+)
+
+if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
+
+saveRDS(meta_overall, file = file.path(results_dir, "meta_OVERALL_all_metabolites.rds"))
+
+# Create function for meta results 
+run_and_annotate <- function(data, metabolite_name, results_dir) {
+  subset_data <- dataset %>% filter(Neurometabolite_Type == metabolite_name) 
+  
+  if(nrow(subset_data) < 3) {
+    message(paste("Skipping", metabolite_name, "- need at least 3 studies"))
+    return(NULL)
+  }
+
+  meta_result <- metagen(
+    TE = SDM, seTE = `SDM Std Err`, data = subset_data, studlab = Study,
+    common = FALSE, random = TRUE, method.tau = "DL", 
+    method.random.ci = "classic", prediction = TRUE, sm = "SMD"
+  )
+  
+  saveRDS(meta_result, file = file.path(results_dir, paste0("meta_", metabolite_name, ".rds")))
+  return(subset_data)
+}
+
+write_xlsx(dataset, path = file.path(results_dir, "DATASET_all_metabolites.xlsx"), col_names = TRUE, format_headers = TRUE)
+
+##### METABOLITE-SPECIFIC META-ANALYSIS ######
+
+# Glutamate
+dataset_glu <- run_and_annotate(dataset, "Glu", results_dir)
+
+# Glutamate+Glutamine
+dataset_glx <- run_and_annotate(dataset, "Glx", results_dir)
+
+# All summaries
+message("--- OVERALL RESULTS (All 'Y' Metabolites) ---")
+summary(meta_overall)
+
+message("--- INDIVIDUAL Glu RESULTS ---")
+summary(readRDS(file.path(results_dir, "meta_Glu.rds")))
+
+# Save excel to use in the next script
+write_xlsx(dataset_glu, path = file.path(results_dir, "DATASET_Glu.xlsx"), col_names = TRUE, format_headers = TRUE)
+write_xlsx(dataset_glx, path = file.path(results_dir, "DATASET_Glx.xlsx"), col_names = TRUE, format_headers = TRUE)
+
+```
