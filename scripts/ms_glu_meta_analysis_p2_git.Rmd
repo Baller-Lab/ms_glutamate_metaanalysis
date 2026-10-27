@@ -1,0 +1,2747 @@
+---
+title: "ms_glu_meta_analysis_p2_git"
+output: html_document
+date: "2026-10-26"
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### MS-GLUTAMATE META-ANALYSIS: STEP 2 ###
+
+"Brain glutamate, disease burden, and neuropsychiatric symptoms in multiple sclerosis: a meta-analysis"
+
+This is the second script (out of two), to run the statistical analyses for the ms-glutamate meta-analysis project. This script uses the meta-analyses from script 1 to run moderate analyses, meta-regressions, figures, and sensitivity analyses. 
+
+Pre: 
+- Script 1 (ms_glutamate_metaanalysis/scripts/ms_glu_meta_analysis_p1_git.Rmd).
+- Update base_dir to reflect local environment.
+- Ensure that all packages (listed in stage 1: setup chunk) have been previously downloaded.
+- Have the meta-analysis data (github: ms_glutamate_metaanalysis/data/) downloaded and loaded into the appropriate folder.
+
+Post:
+- All statistical analyses and figures needed to replicate the meta-analysis. 
+
+<https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/> Citation:
+Harrer, M., Cuijpers, P., Furukawa, T.A., & Ebert, D.D. (2021). Doing Meta-Analysis with R: A Hands-On Guide. Boca Raton, FL and London: Chapman & Hall/CRC Press. ISBN 978-0-367-61007-4.
+
+# ----------------------------------------------
+#### Setup
+```{r setup-packages}
+# Set paths
+base_dir   <- "/Users/elenacooper/Desktop/MS_Meta_Analysis" # update this path to reflect your local environment
+results_dir <- file.path(base_dir, "/final_results")
+
+# Load packages
+load_packages <- function(packages) {
+  for (pkg in packages) {
+    if (!requireNamespace(pkg, quietly = TRUE)) {
+      install.packages(pkg)
+    }
+    library(pkg, character.only = TRUE)
+  }
+}
+
+packages_needed <- c(
+  "readxl", "writexl", "tidyverse", "grid", "gridExtra", "ggplot2", "patchwork", "gt", "webshot2", "gridGraphics",
+  "ggpattern", "knitr", "esc", "metafor", "meta", "dmetar", "DeLuciatoR", "RColorBrewer", "ggsignif", "broom", "cowplot"
+)
+
+load_packages(packages_needed)
+
+```
+
+# ----------------------------------------------
+### Stage 3: Load data, create functions, and explore moderator effects
+#### Load datasets
+```{r}
+# Load raw data
+dataset_all <- read_xlsx(paste0(results_dir,"/DATASET_all_metabolites.xlsx"))
+dataset_glu <- read_xlsx(paste0(results_dir,"/DATASET_Glu.xlsx"))
+dataset_glx <- read_xlsx(paste0(results_dir,"/DATASET_Glx.xlsx"))
+
+# Load the meta results 
+meta_results <- readRDS(paste0(results_dir,"/meta_OVERALL_all_metabolites.rds"))
+meta_results_glu <- readRDS(paste0(results_dir,"/meta_Glu.rds"))
+meta_results_glx <- readRDS(paste0(results_dir,"/meta_Glx.rds"))
+
+metab_metaresults <- list(
+  Glu = meta_results_glu,
+  Glx = meta_results_glx
+)
+
+# Define the metabolites
+all_metabolites <- c("Glu", "Glx")
+
+```
+
+##### Edit Data
+```{r}
+# Create a list for cortical and sub-cortical regions
+cortical_region_order <- c("Frontal", "Temporal", "Occipital", "Parietal")
+subcortical_region_order <- c("Thalamus", "Basal Ganglia", "Hypothalamus")
+
+# Create cortical and sub-cortical groupings in all dataframes
+dataset_all <- dataset_all %>%
+  mutate(Brain_Division = case_when(
+    Cortical %in% cortical_region_order ~ "Cortical",
+    Sub_Cortical %in% subcortical_region_order ~ "Subcortical",
+    TRUE ~ NA_character_
+  ))
+
+dataset_glu <- dataset_glu %>%
+  mutate(Brain_Division = case_when(
+    Cortical %in% cortical_region_order ~ "Cortical",
+    Sub_Cortical %in% subcortical_region_order ~ "Subcortical",
+    TRUE ~ NA_character_
+  ))
+
+dataset_glx <- dataset_glx %>%
+  mutate(Brain_Division = case_when(
+    Cortical %in% cortical_region_order ~ "Cortical",
+    Sub_Cortical %in% subcortical_region_order ~ "Subcortical",
+    TRUE ~ NA_character_
+  ))
+
+```
+# ----------------------------------------------
+#### Create Functions
+The functions created below are also available as a separate R script (glu_meta_analysis_functions.R) on the github project page.
+
+##### run_baseline_meta_pipeline
+```{r}
+run_baseline_meta_pipeline <- function(results_dir, metab_colors = c("Glu" = "#C76B72", "Glx" = "#E6B65E", "Overall" = "#05668d")) {
+  
+  if (!dir.exists(results_dir)) dir.create(results_dir, recursive = TRUE)
+  
+  dataset_all <- bind_rows(
+    if(exists("dataset_glu")) dataset_glu %>% mutate(Neurometabolite_Type = "Glu") else NULL,
+    if(exists("dataset_glx")) dataset_glx %>% mutate(Neurometabolite_Type = "Glx") else NULL
+  )
+  
+### Compute Primary Estimates ###
+  
+  # Overall 
+  overall_meta <- metagen(TE = SDM, seTE = `SDM Std Err`, data = dataset_all, studlab = Study,
+                          common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD")
+  
+  sink(file.path(results_dir, "Overall_Metabolite_Stats_Full.txt"))
+  cat("--- OVERALL META-ANALYSIS (ALL METABOLITES COMBINED) ---\n")
+  print(summary(overall_meta))
+  sink()
+  
+  # Build baseline table
+  metabolites <- c("Glu", "Glx")
+  meta_results_table <- data.frame()
+  
+  for (m in metabolites) {
+    df_sub <- dataset_all %>% filter(Neurometabolite_Type == m)
+    if (nrow(df_sub) >= 3) {
+      m_meta <- metagen(TE = SDM, seTE = `SDM Std Err`, data = df_sub, studlab = Study,
+                        common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD")
+      meta_results_table <- rbind(meta_results_table, data.frame(
+        Metabolite = m, k = m_meta$k, Effect_Size = as.numeric(m_meta$TE.random),
+        Lower = as.numeric(m_meta$lower.random), Upper = as.numeric(m_meta$upper.random),
+        P_Value = as.numeric(m_meta$pval.random), Q_Stat = as.numeric(m_meta$Q),
+        Q_P_Value = as.numeric(m_meta$pval.Q), I2 = as.numeric(m_meta$I2) * 100, stringsAsFactors = FALSE
+      ))
+    }
+  }
+  
+  # Append overall row
+  overall_row <- data.frame(
+    Metabolite = "Overall", k = overall_meta$k, Effect_Size = as.numeric(overall_meta$TE.random),
+    Lower = as.numeric(overall_meta$lower.random), Upper = as.numeric(overall_meta$upper.random),
+    P_Value = as.numeric(overall_meta$pval.random), Q_Stat = as.numeric(overall_meta$Q),
+    Q_P_Value = as.numeric(overall_meta$pval.Q), I2 = as.numeric(overall_meta$I2) * 100, stringsAsFactors = FALSE
+  )
+  
+  meta_results_table <- bind_rows(overall_row, meta_results_table) %>%
+    mutate(
+      Stars = case_when(P_Value < 0.001 ~ "***", P_Value < 0.01 ~ "**", P_Value < 0.05 ~ "*", TRUE ~ ""),
+      Metabolite = factor(Metabolite, levels = c("Overall", "Glu", "Glx"))
+    )
+  
+### Post-Hoc Pairwise Comparisons ###
+  
+  metab_levels <- unique(as.character(dataset_all$Neurometabolite_Type))
+  pairwise_results <- data.frame()
+  
+  if (length(metab_levels) >= 2) {
+    level_pairs <- utils::combn(metab_levels, 2, simplify = FALSE)
+    for (pair in level_pairs) {
+      p_subset <- dataset_all %>% filter(Neurometabolite_Type %in% pair)
+      try({
+        comp_meta_base <- metagen(TE = SDM, 
+                                  seTE = `SDM Std Err`, 
+                                  data = p_subset, 
+                                  common = FALSE, 
+                                  random = TRUE, 
+                                  method.tau = "DL", 
+                                  sm = "SMD")
+        comp_meta <- update(comp_meta_base, subgroup = p_subset$Neurometabolite_Type)
+        pairwise_results <- rbind(pairwise_results, data.frame(
+                                  Group_1 = pair[1], 
+                                  Group_2 = pair[2], 
+                                  Q_Between = comp_meta$Q.b.random, 
+                                  P_Value = comp_meta$pval.Q.b.random, 
+                                  stringsAsFactors = FALSE))
+      }, silent = TRUE)
+    }
+  }
+  
+  if (nrow(pairwise_results) > 0) {
+    pairwise_results$FDR_p <- p.adjust(pairwise_results$P_Value, method = "fdr")
+  }
+  
+### Figures and Tables ###
+  
+  # Main bar plot (excluding overall)
+  fig_main_results <- ggplot(meta_results_table %>% filter(Metabolite != "Overall"), 
+                             aes(x = Metabolite, y = Effect_Size, fill = Metabolite)) + 
+    geom_col(width = 0.6, color = "black", show.legend = FALSE) +
+    geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.15, linewidth = 0.8) +
+    geom_hline(yintercept = 0.0, linetype = "solid", color = "grey30") +
+    geom_text(aes(label = Stars, y = Upper + 0.05), size = 6, fontface = "bold", vjust = 0) +
+    geom_text(aes(label = paste0("k=", k), y = Lower - 0.1), size = 4, fontface = "italic") +
+    scale_y_continuous(name = "Pooled Effect Size (SMD)") +
+    scale_fill_manual(values = metab_colors) +
+    labs(title = "Summary of Metabolite Changes") +
+    theme_linedraw() + 
+    theme(
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+      panel.background = element_rect(fill = "white", color = NA), plot.background = element_rect(fill = "white", color = NA),
+      panel.border = element_blank(), axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5), axis.text = element_text(color = "black", size = 12), 
+      axis.title.x = element_blank(), axis.text.x  = element_text(angle = 0, hjust = 0.5) 
+    )
+  
+  ggsave(filename = file.path(results_dir, "Figure_Main_Meta_Summary.pdf"), plot = fig_main_results, width = 7, height = 5)
+  writexl::write_xlsx(list(Main_Results = meta_results_table, Pairwise_Comparisons = pairwise_results), file.path(results_dir, "Table_Main_Meta_Results.xlsx"))
+  
+  # Generate presentation table
+  if (nrow(pairwise_results) > 0) {
+    post_hoc_table <- pairwise_results %>%
+      select(Group_1, Group_2, Q_Between, P_Value, FDR_p) %>%
+      gt() %>%
+      tab_header(title = "Post-Hoc Pairwise Comparisons Between Metabolites") %>%
+      cols_label(Group_1 = "Metabolite", Group_2 = "Comparison", Q_Between = "Q-Statistic", P_Value = "p-value", FDR_p = "FDR Adjusted p") %>%
+      fmt_number(columns = c(Q_Between), decimals = 2) %>%
+      fmt_number(columns = c(P_Value, FDR_p), decimals = 3) %>%
+      tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels()) %>%
+      tab_style(style = cell_fill(color = "#f8f9fa"), locations = cells_body(rows = FDR_p < 0.05)) %>%
+      tab_style(style = cell_text(color = "#A11332", weight = "bold"), locations = cells_body(columns = FDR_p, rows = FDR_p < 0.05)) %>%
+      tab_options(table.border.top.color = "black", column_labels.border.bottom.color = "black", table.width = pct(80))
+    
+    gtsave(data = post_hoc_table, filename = file.path(results_dir, "Table_PostHoc_Final.pdf"))
+  }
+  
+  # Total sample printout
+  total_sample_size <- dataset_all %>%
+    distinct(Study_ID, .keep_all = TRUE) %>%
+    summarise(Total_Cases = sum(Case_Sample_size, na.rm = TRUE),
+              Total_Controls = sum(Control_Sample_size, na.rm = TRUE),
+              Grand_Total = Total_Cases + Total_Controls)
+  
+  print(total_sample_size)
+  
+  return(list(summary_table = meta_results_table, pairwise = pairwise_results))
+}
+
+```
+
+##### run_categorical_moderator_pipeline
+```{r}
+run_categorical_moderator_pipeline <- function(subgroup_var, 
+                                               subgroup_name, 
+                                               results_dir, 
+                                               x_axis_order = NULL) {
+  
+  safe_name <- gsub("[^a-zA-Z0-9_.-]", "_", subgroup_name)
+  output_path <- file.path(results_dir, "Moderator_Analyses", safe_name)
+  if (!dir.exists(output_path)) dir.create(output_path, recursive = TRUE)
+  
+  # Plot Theme
+  pipeline_theme <- theme_bw(base_size = 18) + 
+    theme(
+      panel.background = element_rect(fill = "white", color = NA),
+      plot.background  = element_rect(fill = "white", color = NA),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      panel.border = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text = element_text(color = "black", size = 12), 
+      axis.text.x = element_text(angle = 45, hjust = 1),
+      plot.title = element_text(face = "bold", size = 16)
+    )
+  
+### Overall Analysis (dataset_all) ###
+  
+  df_overall <- dataset_all %>%
+    filter(!is.na(!!sym(subgroup_var)), !is.na(SDM)) %>%
+    group_by(!!sym(subgroup_var)) %>%
+    filter(n() >= 3) %>%
+    ungroup()
+  
+  overall_output <- NULL
+  
+  if (nrow(df_overall) > 0) {
+    meta_overall <- metagen(
+      TE = SDM, seTE = `SDM Std Err`, data = df_overall, studlab = Study,
+      common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD",
+      subgroup = df_overall[[subgroup_var]]
+    )
+    
+    n_counts_overall <- df_overall %>%
+      group_by(!!sym(subgroup_var)) %>%
+      summarise(k = n(), N_studies = n_distinct(Study_ID), .groups = 'drop') %>%
+      rename(subgroup = !!sym(subgroup_var))
+    
+    summary_overall <- data.frame(
+      subgroup = names(meta_overall$k.w),
+      estimate = as.numeric(meta_overall$TE.random.w),      
+      p_value = as.numeric(meta_overall$pval.random.w),     
+      conf.low = as.numeric(meta_overall$lower.random.w),   
+      conf.high = as.numeric(meta_overall$upper.random.w),  
+      stringsAsFactors = FALSE
+    ) %>%
+      left_join(n_counts_overall, by = "subgroup") %>%
+      mutate(
+        significance = case_when(p_value < 0.001 ~ "***", p_value < 0.01 ~ "**", p_value < 0.05 ~ "*", TRUE ~ "ns"),
+        plot_label = paste0(subgroup, "\n(k=", k, ")")
+      )
+    
+    # Plot Overall
+    p_overall <- ggplot(summary_overall, aes(x = plot_label, y = estimate)) +
+      geom_col(fill = "#5F6DAE", colour = "black", width = 0.6) + 
+      geom_errorbar(aes(ymin = conf.low, ymax = conf.high), width = 0.1) +
+      geom_hline(yintercept = 0, linetype = "solid", color = "grey30") + 
+      geom_text(aes(y = conf.high + 0.05, label = ifelse(significance == "ns", "", significance)), size = 6) +
+      labs(title = paste("Overall Effect of", subgroup_name), x = NULL, y = "Pooled SMD") +
+      pipeline_theme
+    
+    ggsave(file.path(output_path, "Overall_Subgroup_Plot.png"), p_overall, width = 8, height = 6)
+    
+    overall_output <- list(model = meta_overall, table_data = summary_overall)
+  }
+  
+### Split by Metabolite (glutamate & glutamate+glutamine) ###
+  
+  metabolite_datasets <- list(
+    Glu = if(exists("dataset_glu")) dataset_glu else NULL,
+    Glx = if(exists("dataset_glx")) dataset_glx else NULL
+  )
+  metabolite_datasets <- metabolite_datasets[!sapply(metabolite_datasets, is.null)]
+  
+  summary_list <- list()
+  all_pairwise_results <- data.frame()
+  metab_colors <- c("Glu" = "#C76B72", "Glx" = "#E6B65E")
+  
+  for (metab in names(metabolite_datasets)) {
+    df_current <- metabolite_datasets[[metab]] %>% filter(!is.na(!!sym(subgroup_var)))
+    if (nrow(df_current) < 3) next
+    
+    meta_sub <- metagen(TE = SDM, seTE = `SDM Std Err`, data = df_current, studlab = Study,
+                        common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD")
+    meta_subgroup <- update(meta_sub, subgroup = df_current[[subgroup_var]], subgroup.name = subgroup_name)
+    
+    # Save Text Summary
+    sink(file.path(output_path, paste0("meta_results_", metab, ".txt")))
+    cat(paste0("Analysis for Metabolite: ", metab, "\n"))
+    print(summary(meta_subgroup))
+    sink()
+    
+    n_counts_sub <- df_current %>%
+      group_by(!!sym(subgroup_var)) %>%
+      summarise(
+        k = n(), N_studies = n_distinct(Study_ID),
+        Total_N_Case = sum(distinct(pick(Study_ID, Case_Sample_size))$Case_Sample_size, na.rm = TRUE),
+        Total_N_Control = sum(distinct(pick(Study_ID, Control_Sample_size))$Control_Sample_size, na.rm = TRUE),
+        .groups = 'drop'
+      ) %>% rename(subgroup = !!sym(subgroup_var))
+    
+    if (!is.null(meta_subgroup$bylevs)) {
+      summary_df <- data.frame(
+        Neurometabolite_Type = metab,
+        subgroup = as.character(meta_subgroup$bylevs),
+        Effect_Size = as.numeric(meta_subgroup$TE.random.w),
+        Lower = as.numeric(meta_subgroup$lower.random.w),
+        Upper = as.numeric(meta_subgroup$upper.random.w),
+        Pvalue = as.numeric(meta_subgroup$pval.random.w),
+        Q_stat = as.numeric(meta_subgroup$Q.w),    
+        I2 = as.numeric(meta_subgroup$I2.w) * 100,
+        stringsAsFactors = FALSE
+      ) %>%
+        left_join(n_counts_sub, by = "subgroup") %>%
+        mutate(
+          plot_label = paste0(subgroup, "\n(k=", k, ", N=", N_studies, ")\n", "C/H: ", Total_N_Case, "/", Total_N_Control),
+          Significance_Stars = case_when(Pvalue < 0.001 ~ "***", Pvalue < 0.01  ~ "**", Pvalue < 0.05  ~ "*", TRUE ~ "")
+        )
+      
+      summary_list[[metab]] <- summary_df
+      
+      # Plot individual metabolite
+      p_metab <- ggplot(summary_df, aes(x = plot_label, y = Effect_Size, fill = Neurometabolite_Type)) +
+        geom_col(colour = "black", width = 0.6, show.legend = FALSE) +
+        geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.1) +
+        geom_hline(yintercept = 0, linetype = "solid", color = "grey30") + 
+        geom_text(aes(y = Upper + 0.05, label = Significance_Stars), size = 6) +
+        scale_fill_manual(values = metab_colors) + 
+        labs(title = paste("Average Effect Size:", metab), subtitle = paste("Moderator:", subgroup_name), x = NULL, y = "Effect Size (SMD)") +
+        pipeline_theme
+      
+      ggsave(file.path(output_path, paste0(metab, "_Subgroup_Plot.png")), p_metab, width = 7, height = 6)
+      
+      # Pairwise Comparisons
+      mod_levels <- as.character(meta_subgroup$bylevs)
+      if (length(mod_levels) >= 2) {
+        level_pairs <- utils::combn(mod_levels, 2, simplify = FALSE)
+        for (pair in level_pairs) {
+          pair_df <- df_current[df_current[[subgroup_var]] %in% pair, ]
+          try({
+            pair_base <- metagen(TE = SDM, seTE = `SDM Std Err`, data = pair_df, common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD")
+            pair_meta <- update(pair_base, subgroup = pair_df[[subgroup_var]])
+            all_pairwise_results <- rbind(all_pairwise_results, data.frame(
+              Metabolite = metab, Group_1 = pair[1], Group_2 = pair[2],
+              Q_Test = pair_meta$Q.b.random, P_Value = pair_meta$pval.Q.b.random, stringsAsFactors = FALSE
+            ))
+          }, silent = TRUE)
+        }
+      }
+    }
+  }
+  
+### Combined Cross-Metabolite Plot & Excel Extraction ###
+  
+  excel_out_list <- list()
+  
+  if (length(summary_list) > 0) { 
+    combined_summary <- bind_rows(summary_list) %>%
+      mutate(Neurometabolite_Type = factor(Neurometabolite_Type, levels = c("Glu", "Glx"))) %>%
+      arrange(Neurometabolite_Type)
+    
+    excel_out_list$Subgroup_Stats <- combined_summary
+    
+    if (length(summary_list) > 1) {
+      comp_plot <- ggplot(combined_summary, aes(x = plot_label, y = Effect_Size, fill = Neurometabolite_Type)) +
+        geom_col(position = position_dodge(width = 0.8), colour = "black", width = 0.7) +
+        geom_errorbar(aes(ymin = Lower, ymax = Upper), position = position_dodge(width = 0.8), width = 0.1) +
+        geom_hline(yintercept = 0) +
+        scale_fill_manual(values = metab_colors, name = "Metabolite") +
+        geom_text(aes(y = Upper + 0.1, label = Significance_Stars), position = position_dodge(width = 0.8), size = 6, fontface = "bold") +
+        labs(title = paste("Metabolite Comparison:", subgroup_name), x = NULL, y = "Effect Size (SMD)") +
+        pipeline_theme + theme(legend.position = "right")
+      
+      ggsave(file.path(output_path, "Comparison_Across_Metabolites_Plot.png"), comp_plot, width = 12, height = 7)
+    }
+  }
+  
+  if (nrow(all_pairwise_results) > 0) {
+    all_pairwise_results$FDR_p <- p.adjust(all_pairwise_results$P_Value, method = "fdr")
+    excel_out_list$Pairwise_Comparisons <- all_pairwise_results
+  }
+  
+  if (length(excel_out_list) > 0) {
+    write_xlsx(excel_out_list, path = file.path(output_path, paste0(safe_name, "_Results_Summary.xlsx")))
+  }
+  
+  return(list(overall = overall_output, metabolites = summary_list)) 
+}
+
+```
+
+##### run_continuous_regression_pipeline
+```{r}
+run_continuous_regression_pipeline <- function(df, moderator, moderator_name, results_dir) {
+  
+  safe_mod_name <- gsub("[^a-zA-Z0-9_.-]", "_", gsub("#", "Number", gsub("%", "Percent", moderator_name)))
+  
+  df_clean <- df %>%
+    filter(!is.na(!!sym(moderator))) %>%
+    mutate(temp_mod = as.numeric(!!sym(moderator))) %>%
+    filter(!is.na(temp_mod))
+  
+  if (nrow(df_clean) < 3) {
+    message(paste("Skipping Regressions for", moderator, ": Too few studies."))
+    return(NULL)
+  }
+  
+  pub_theme <- theme_linedraw() + 
+    theme(
+      panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+      panel.border = element_blank(), panel.background = element_rect(fill = "white", color = NA),
+      plot.background  = element_rect(fill = "white", color = NA),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text = element_text(color = "black", size = 12),
+      axis.title = element_text(color = "black", size = 13),
+      legend.background = element_rect(fill = "white"), legend.position   = "bottom"
+    )
+  
+  plot_list <- list()
+  
+### Overall Regression (All metabolites combined) ###
+  
+  overall_folder <- file.path(results_dir, "Overall_Regressions", safe_mod_name)
+  if (!dir.exists(overall_folder)) dir.create(overall_folder, recursive = TRUE)
+  
+  reg_overall <- rma(yi = SDM, sei = `SDM Std Err`, mods = ~ temp_mod, data = df_clean, method = "DL")
+  p_val_ov <- reg_overall$pval[2]
+  p_label_ov <- if (p_val_ov < 0.001) "p < 0.001" else paste0("p = ", round(p_val_ov, 3))
+  
+  results_txt <- paste0("Analysis: OVERALL (All Metabolites Combined)\nModerator: ", moderator_name, 
+                        "\nk (obs): ", nrow(df_clean), "\nN (studies): ", n_distinct(df_clean$Study_ID),
+                        "\nSlope: ", round(reg_overall$b[2], 4), "\nP-value: ", p_label_ov)
+  writeLines(results_txt, file.path(overall_folder, paste0("Overall_Summary_", safe_mod_name, ".txt")))
+  
+  p_overall <- ggplot(df_clean, aes(x = temp_mod, y = SDM)) +
+    geom_hline(yintercept = 0, linetype = "solid", color = "grey80") +
+    geom_point(aes(size = 1/`SDM Std Err`), shape = 21, fill = "#26547c", alpha = 0.5) +
+    geom_smooth(method = "lm", color = "black", fill = "grey90", linewidth = 1) +
+    labs(title = paste("Overall Analysis vs", moderator_name),
+         subtitle = paste0("Slope = ", round(reg_overall$b[2], 3), " | ", p_label_ov),
+         x = moderator_name, y = "Effect Size (SMD)", size = "Precision (1/SE)") +
+    pub_theme
+  
+  ggsave(file.path(overall_folder, paste0("Overall_Plot_", safe_mod_name, ".png")), p_overall, width = 8, height = 6, dpi = 300)
+  plot_list[["Overall"]] <- p_overall
+
+### Individual Metabolite Regressions and Interaction Model ###
+  
+  split_folder <- file.path(results_dir, "Regression_Glu_vs_Glx", safe_mod_name)
+  if (!dir.exists(split_folder)) dir.create(split_folder, recursive = TRUE)
+  
+  metab_colors <- c("Glu" = "#C76B72", "Glx" = "#E6B65E")
+  
+  for (metab in c("Glu", "Glx")) {
+    metab_df <- df_clean %>% filter(Neurometabolite_Type == metab)
+    if (nrow(metab_df) <= 2) next
+    
+    reg_indiv <- rma(yi = SDM, sei = `SDM Std Err`, mods = ~ temp_mod, data = metab_df, method = "DL")
+    variable_p <- if (reg_indiv$pval[2] < 0.001) "p < 0.001" else paste0("p = ", round(reg_indiv$pval[2], 3))
+    
+    sink(file.path(split_folder, paste0(metab, "_Meta_Regression.txt")))
+    cat(paste0("--- ", metab, " META-REGRESSION ---\nk = ", nrow(metab_df), "\n"))
+    print(summary(reg_indiv))
+    sink()
+    
+    p_indiv <- ggplot(metab_df, aes(x = temp_mod, y = SDM)) +
+      geom_hline(yintercept = 0, linetype = "solid", color = "grey80") +
+      geom_point(shape = 21, size = 3, fill = metab_colors[metab], color = "black") +
+      geom_smooth(method = "lm", se = TRUE, color = "black", fill = "grey90", alpha = 0.4) +
+      labs(title = paste0(metab, " Meta-Regression: ", moderator_name),
+           subtitle = paste0("Slope=", round(reg_indiv$b[2], 3), " | ", variable_p),
+           x = moderator_name, y = "Effect Size (SMD)") +
+      pub_theme
+    
+    ggsave(file.path(split_folder, paste0(metab, "_Plot.png")), p_indiv, width = 7, height = 5)
+    plot_list[[metab]] <- p_indiv
+  }
+  
+  # Interaction / Comparison Model
+  if (length(unique(df_clean$Neurometabolite_Type)) >= 2) {
+    reg_int <- rma(yi = SDM, sei = `SDM Std Err`, mods = ~ temp_mod * Neurometabolite_Type, data = df_clean, method = "DL")
+    write.csv(as.data.frame(coef(summary(reg_int))), file.path(split_folder, "Interaction_Comparison_Results.csv"))
+    
+    comp_plot <- ggplot(df_clean, aes(x = temp_mod, y = SDM, color = Neurometabolite_Type, fill = Neurometabolite_Type)) +
+      geom_hline(yintercept = 0, linetype = "solid", color = "grey80") +
+      geom_point(aes(size = 1/`SDM Std Err`), shape = 21, alpha = 0.5, color = "black") +
+      geom_smooth(method = "lm", alpha = 0.1, fullrange = TRUE) +
+      scale_color_manual(values = metab_colors) + scale_fill_manual(values = metab_colors) +
+      labs(title = paste("Comparison Across Metabolites:", moderator_name), subtitle = "Interaction Model Line Fit",
+           x = moderator_name, y = "Effect Size (SMD)", size = "Precision (1/SE)") +
+      pub_theme
+    
+    ggsave(file.path(split_folder, "Comparison_Interaction_Plot.png"), comp_plot, width = 8, height = 6)
+    plot_list[["Comparison"]] <- comp_plot
+  }
+  
+  return(plot_list)
+}
+
+```
+
+##### run_metabolite_comparison_stats
+```{r}
+run_metabolite_comparison_stats <- function(subgroup_var) {
+  
+  combined_data <- bind_rows(
+    if(exists("dataset_glu")) dataset_glu else NULL,
+    if(exists("dataset_glx")) dataset_glx else NULL
+  )
+  
+  combined_data <- combined_data %>% filter(!is.na(!!sym(subgroup_var)))
+  
+  diff_stats <- data.frame()
+  subtypes <- unique(combined_data[[subgroup_var]])
+  
+  for (s in subtypes) {
+    sub_df <- combined_data %>% filter(!!sym(subgroup_var) == s)
+    
+    metab_count <- length(unique(sub_df$Neurometabolite_Type))
+    
+    if(nrow(sub_df) > 3 & metab_count > 1) {
+      try({
+        res <- rma(yi = SDM, sei = `SDM Std Err`, 
+                   mods = ~ Neurometabolite_Type, 
+                   data = sub_df, method = "DL")
+        
+        diff_stats <- rbind(diff_stats, data.frame(
+          subgroup = s,
+          Q_Value = res$QM,
+          P_Value = res$QMp,
+          stringsAsFactors = FALSE
+        ))
+      }, silent = TRUE)
+    }
+  }
+  
+  return(diff_stats)
+}
+
+```
+# ----------------------------------------------
+#### Baseline Stats
+```{r}
+# Define Directory Output
+base_results_dir <- "/Users/elenacooper/Desktop/MS_Meta_Analysis/final_results" ## update this path to your local environment or match to previously defined output directory
+
+# Run Baseline Analysis
+baseline_stats <- run_baseline_meta_pipeline(results_dir = base_results_dir)
+
+```
+# ----------------------------------------------
+#### Moderator Analyses
+##### MS Subtype
+```{r}
+ms_subtype_moderator <- run_categorical_moderator_pipeline(
+  subgroup_var = "Dx_Only", 
+  subgroup_name = "MS Subtype", 
+  results_dir = base_results_dir
+)
+
+```
+
+##### Tissue Type
+```{r}
+tissue_moderator <- run_categorical_moderator_pipeline(
+  subgroup_var = "Brain_Tissue", 
+  subgroup_name = "Tissue Type", 
+  results_dir = base_results_dir
+)
+
+```
+
+##### Type of WM
+```{r}
+wm_moderator <- run_categorical_moderator_pipeline(
+  subgroup_var = "Type_WM", 
+  subgroup_name = "Type of WM", 
+  results_dir = base_results_dir
+)
+
+```
+
+##### Cortical/Subcortical
+```{r}
+cortical_subcortical_moderator <- run_categorical_moderator_pipeline(
+  subgroup_var = "Brain_Division", 
+  subgroup_name = "Brain Division", 
+  results_dir = base_results_dir
+)
+
+```
+
+##### DMT
+```{r}
+dmt_moderator <- run_categorical_moderator_pipeline(
+  subgroup_var = "DMT", 
+  subgroup_name = "DMT", 
+  results_dir = base_results_dir
+)
+
+```
+# ----------------------------------------------
+#### Meta-Regressions
+##### Disease Duration
+```{r}
+disease_dur_percent_regression <- run_continuous_regression_pipeline(
+  df = dataset_all, 
+  moderator = "Mean_Disease_duration", 
+  moderator_name = "Mean Disease Duration", 
+  results_dir = base_results_dir
+)
+
+```
+
+##### % Med at Scan
+```{r}
+med_percent_regression <- run_continuous_regression_pipeline(
+  df = dataset_all, 
+  moderator = "Percent_Med_at_Scan", 
+  moderator_name = "Percent on Medication at Scan", 
+  results_dir = base_results_dir
+)
+
+```
+# ----------------------------------------------
+#### Paper Specific Graphs/Tables
+
+##### Overall Glutamate vs Glutamate+Glutamine Finding
+```{r}
+dataset_all <- bind_rows(
+  if(exists("dataset_glu")) dataset_glu %>% mutate(Neurometabolite_Type = "Glu") else NULL,
+  if(exists("dataset_glx")) dataset_glx %>% mutate(Neurometabolite_Type = "Glx") else NULL
+)
+
+### Run Meta-analysis
+overall_meta <- metagen(
+  TE = SDM, seTE = `SDM Std Err`, data = dataset_all, studlab = Study,
+  common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD"
+)
+
+metabolite_types <- c("Glu", "Glx")
+meta_results_table <- data.frame()
+
+for (m in metabolite_types) {
+  df_sub <- dataset_all %>% filter(Neurometabolite_Type == m)
+  if (nrow(df_sub) >= 3) {
+    m_meta <- metagen(TE = SDM, seTE = `SDM Std Err`, data = df_sub, studlab = Study,
+                      common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD")
+    meta_results_table <- rbind(meta_results_table, data.frame(
+      Metabolite = m, k = m_meta$k, Effect_Size = as.numeric(m_meta$TE.random),
+      Lower = as.numeric(m_meta$lower.random), Upper = as.numeric(m_meta$upper.random),
+      P_Value = as.numeric(m_meta$pval.random), Q_Stat = as.numeric(m_meta$Q),
+      Q_P_Value = as.numeric(m_meta$pval.Q), I2 = as.numeric(m_meta$I2) * 100, 
+      stringsAsFactors = FALSE
+    ))
+  }
+}
+
+overall_row <- data.frame(
+  Metabolite = "Overall", k = overall_meta$k, Effect_Size = as.numeric(overall_meta$TE.random),
+  Lower = as.numeric(overall_meta$lower.random), Upper = as.numeric(overall_meta$upper.random),
+  P_Value = as.numeric(overall_meta$pval.random), Q_Stat = as.numeric(overall_meta$Q),
+  Q_P_Value = as.numeric(overall_meta$pval.Q), I2 = as.numeric(overall_meta$I2) * 100, 
+  stringsAsFactors = FALSE
+)
+
+meta_results_table <- bind_rows(overall_row, meta_results_table) %>%
+  mutate(
+    Stars = case_when(P_Value < 0.001 ~ "***", P_Value < 0.01 ~ "**", P_Value < 0.05 ~ "*", TRUE ~ "ns"),
+    Metabolite = factor(Metabolite, levels = c("Overall", "Glu", "Glx"))
+  )
+
+### Post-Hoc Pairwise Metabolite Comparisons ###
+
+metab_levels <- unique(as.character(dataset_all$Neurometabolite_Type))
+pairwise_results <- data.frame()
+
+if (length(metab_levels) >= 2) {
+  level_pairs <- utils::combn(metab_levels, 2, simplify = FALSE)
+  for (pair in level_pairs) {
+    p_subset <- dataset_all %>% filter(Neurometabolite_Type %in% pair)
+    try({
+      comp_meta_base <- metagen(TE = SDM, seTE = `SDM Std Err`, data = p_subset, common = FALSE, random = TRUE, method.tau = "DL", sm = "SMD")
+      comp_meta      <- update(comp_meta_base, subgroup = p_subset$Neurometabolite_Type)
+      pairwise_results <- rbind(pairwise_results, data.frame(
+        Group_1 = pair[1], Group_2 = pair[2], Q_Between = comp_meta$Q.b.random, P_Value = comp_meta$pval.Q.b.random, stringsAsFactors = FALSE
+      ))
+    }, silent = TRUE)
+  }
+}
+
+comp_label <- "ns" 
+if (nrow(pairwise_results) > 0) {
+  pairwise_results$FDR_p <- p.adjust(pairwise_results$P_Value, method = "fdr")
+  calc_fdr <- pairwise_results$FDR_p[1]
+  comp_label <- case_when(
+    calc_fdr < 0.001 ~ "***",
+    calc_fdr < 0.01 ~ "**",
+    calc_fdr < 0.05 ~ "*",
+    TRUE ~ "ns"
+  )
+}
+
+# Plot
+
+palette_glu_glx <- c("Glu" = "#78a160", "Glx" = "#264a2e")
+
+fig_main_results <- ggplot(meta_results_table %>% filter(Metabolite != "Overall"), 
+                           aes(x = Metabolite, y = Effect_Size, fill = Metabolite)) + 
+  geom_col(width = 0.50, color = "black", linewidth = 0.6, show.legend = FALSE) +
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.12, linewidth = 0.7, color = "black") +
+  geom_hline(yintercept = 0.0, linetype = "solid", color = "black", linewidth = 0.5) +
+  
+  geom_path(data = data.frame(x = c(1, 1, 2, 2), y = c(0.26, 0.28, 0.28, 0.26)), aes(x = x, y = y), inherit.aes = FALSE, linewidth = 0.6) +
+  annotate("text", x = 1.5, y = 0.31, label = comp_label, size = 6, vjust = 0) +
+  
+  scale_x_discrete(labels = c("Glu" = "Glutamate", "Glx" = "Glutamate+\nGlutamine")) +
+  
+  scale_y_continuous(
+    name = expression(
+      atop(
+        "MS - Control Effect Size",
+        paste("(Cohen's ", italic(d), " " %+-% " 95% CI)")
+      )
+    ),
+    limits = c(-0.42, 0.42),                    
+    breaks = seq(-0.4, 0.4, by = 0.2),         
+    expand = c(0, 0)                      
+  ) +
+  scale_fill_manual(values = palette_glu_glx) +
+  theme_classic(base_size = 15, base_family = "sans") +
+  theme(
+    panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA), plot.background = element_rect(fill = "white", color = NA),
+    panel.border = element_blank(), 
+    axis.line.x = element_line(color = "black", linewidth = 0.5),
+    axis.line.y = element_line(color = "black", linewidth = 0.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.5), 
+    axis.text.x = element_text(color = "black", size = 16, margin = margin(t = 6)),  
+    axis.text.y = element_text(color = "black", size = 16),  
+    axis.title.y = element_text(size = 17, margin = margin(r = 11), lineheight = 0.2),
+    axis.title.x = element_blank()
+  )
+
+ggsave(filename = file.path(results_dir, "Figure_Main_Meta_Summary.pdf"), plot = fig_main_results, width = 4.8, height = 4.9, dpi = 300)
+
+### Data exports, gt tables ###
+
+writexl::write_xlsx(
+  list(Main_Pooled_Results = meta_results_table, PostHoc_Comparisons = pairwise_results), 
+  file.path(results_dir, "Table_Main_Meta_Results.xlsx")
+)
+
+if (nrow(pairwise_results) > 0) {
+  post_hoc_presentation_table <- pairwise_results %>%
+    select(Group_1, Group_2, Q_Between, P_Value, FDR_p) %>%
+    gt() %>%
+    tab_header(title = "Post-Hoc Pairwise Comparisons Between Metabolites") %>%
+    cols_label(Group_1 = "Metabolite", Group_2 = "Comparison", Q_Between = "Q-Statistic", P_Value = "p-value", FDR_p = "FDR Adjusted p") %>%
+    fmt_number(columns = c(Q_Between), decimals = 2) %>%
+    fmt_number(columns = c(P_Value, FDR_p), decimals = 3) %>%
+    tab_style(style = cell_text(weight = "bold"), locations = cells_column_labels()) %>%
+    tab_style(style = cell_fill(color = "#f8f9fa"), locations = cells_body(rows = FDR_p < 0.05)) %>%
+    tab_style(style = cell_text(color = "#A11332", weight = "bold"), locations = cells_body(columns = FDR_p, rows = FDR_p < 0.05)) %>%
+    tab_options(table.border.top.color = "black", column_labels.border.bottom.color = "black", table.width = pct(80))
+  
+  gtsave(data = post_hoc_presentation_table, filename = file.path(results_dir, "Table_PostHoc_Final.pdf"))
+}
+
+# Sample size statistics
+
+total_sample_size <- dataset_all %>%
+  distinct(Study_ID, .keep_all = TRUE) %>%
+  summarise(Total_Cases = sum(Case_Sample_size, na.rm = TRUE),
+            Total_Controls = sum(Control_Sample_size, na.rm = TRUE),
+            Grand_Total = Total_Cases + Total_Controls)
+print(total_sample_size)
+
+```
+
+##### Figure 2: Forest Plot for all Metabolites
+```{r}
+df_all_sorted <- dataset_all %>%
+  mutate(
+    Study_Label = sub("(\\d{4})[a-z]+$", "\\1", Study)
+  ) %>%
+  arrange(Study)
+
+# Run Pooled Meta-Analysis
+meta_combined_metab <- metagen(
+  TE = SDM,
+  seTE = `SDM Std Err`,
+  data = df_all_sorted,
+  studlab = Study_Label,
+  random = TRUE,
+  common = FALSE,
+  method.tau = "DL",
+  sm = "SMD"
+)
+
+# 3. Vectorize study square colors based on Neurometabolite_Type
+# Supports exact strings or short labels ("Glu" / "Glx")
+study_square_colors <- case_when(
+  df_all_sorted$Neurometabolite_Type %in% c("Glutamate (Glu)", "Glu") ~ "#78a160",
+  df_all_sorted$Neurometabolite_Type %in% c("Glutamine + Glutamate (Glx)", "Glx") ~ "#264a2e",
+  TRUE ~ "black"
+)
+
+# 4. Dynamically extract and print summary stats
+smd_val  <- meta_combined_metab$TE.random
+p_val    <- meta_combined_metab$pval.random
+i2_val   <- meta_combined_metab$I2 * 100
+q_stat   <- meta_combined_metab$Q
+p_het    <- meta_combined_metab$pval.Q
+
+p_val_str <- if (p_val < 0.001) "p < 0.001" else sprintf("p = %.2f", p_val)
+p_het_str <- if (p_het < 0.001) "p < 0.001" else sprintf("p = %.3f", p_het)
+
+summary_sentence <- sprintf(
+  "(Cohen’s d = %.2f, %s). Substantial between-study heterogeneity was observed (I² = %.2f%%, Q = %.2f, %s)",
+  smd_val, p_val_str, i2_val, q_stat, p_het_str
+)
+
+# 5. Export Combined Forest Plot
+pdf_file <- file.path(results_dir, "Forest_Plot_Combined_Metabolites.pdf")
+
+pdf(pdf_file, width = 8, height = 21)
+
+forest(
+  meta_combined_metab,
+  smlab = "All Neurometabolites",
+  sortvar = Study,
+  prediction = FALSE,
+  
+  # Heterogeneity & Overall Stats Displayed at Bottom
+  overall.hetstat = TRUE,
+  fs.hetstat = 9,
+  
+  # Styling & Colors
+  col.square = study_square_colors,
+  col.square.lines = study_square_colors,
+  col.diamond = "black",
+  col.diamond.lines = "black",
+  col.study = "black",
+  
+  # Axis & Columns Setup
+  xlim = c(-3, 2),
+  at = seq(-3, 2, by = 1),
+  leftcols = c("studlab"),
+  leftlabs = c("Study"),
+  rightcols = c("effect", "ci", "w.random"),
+  rightlabs = c("Cohen's d", "95% CI", "Weight"),
+  
+  # Scaling
+  fs.heading = 13,
+  fs.study = 11,
+  fs.summary = 11,
+  spacing = 1.0,
+  squaresize = 0.8
+)
+
+dev.off()
+
+```
+
+##### Figure 3: Cortical, Subcortical, WML, NAWM Forest Plots
+###### NAWM + WML
+```{r}
+### Data prep ###
+
+df_wm_processed <- dataset_all %>% 
+  filter(Brain_Region_Grouping %in% c("NAWM", "WML")) %>%
+  mutate(
+    Brain_Region_Grouping = case_when(
+      Brain_Region_Grouping == "NAWM" ~ "Normal Appearing White Matter",
+      Brain_Region_Grouping == "WML"  ~ "White Matter Lesions",
+      TRUE ~ Brain_Region_Grouping
+    ),
+    Brain_Region_Grouping = factor(Brain_Region_Grouping, 
+                                   levels = c("White Matter Lesions", "Normal Appearing White Matter")),
+    Study_Label = sub("(.*) ([0-9]{4}).*", "\\1, \\2", Study)
+  ) %>%
+  arrange(Study_Label)
+
+### Run pooled model (with shared variance) ###
+
+m_wm_joint <- metagen(
+  TE = SDM,                        
+  seTE = `SDM Std Err`,            
+  data = df_wm_processed,          
+  studlab = Study_Label,
+  subgroup = Brain_Region_Grouping,   
+  tau.common = TRUE,               
+  random = TRUE,
+  common = FALSE,
+  method.tau = "DL",
+  sm = "SMD"
+)
+
+### Summary bar plot ###
+
+extracted_smd <- m_wm_joint$TE.random.w
+extracted_lower <- m_wm_joint$lower.random.w
+extracted_upper <- m_wm_joint$upper.random.w
+extracted_pvalues <- m_wm_joint$pval.random.w
+
+df_wm_bars <- tibble(
+  Tissue  = c("Normal Appearing White Matter", "White Matter Lesions"),
+  SMD = c(as.numeric(extracted_smd["Normal Appearing White Matter"]), as.numeric(extracted_smd["White Matter Lesions"])),
+  Lower = c(as.numeric(extracted_lower["Normal Appearing White Matter"]),  as.numeric(extracted_lower["White Matter Lesions"])),
+  Upper = c(as.numeric(extracted_upper["Normal Appearing White Matter"]), as.numeric(extracted_upper["White Matter Lesions"])),
+  P_Value = c(as.numeric(extracted_pvalues["Normal Appearing White Matter"]), as.numeric(extracted_pvalues["White Matter Lesions"]))
+)
+
+df_wm_bars <- df_wm_bars %>%
+  mutate(Tissue = case_when(
+    Tissue == "Normal Appearing White Matter" ~ "Normal Appearing\nWhite Matter",
+    Tissue == "White Matter Lesions" ~ "White Matter\nLesions",
+    TRUE ~ Tissue),
+    Tissue = factor(Tissue, levels = c("White Matter\nLesions", "Normal Appearing\nWhite Matter"))
+  ) %>% 
+  arrange(Tissue)
+
+p_wm_diff <- m_wm_joint$pval.Q.b2.random
+if (length(p_wm_diff) == 0 || is.null(p_wm_diff)) {
+  p_wm_diff <- m_wm_joint$pval.Q.b.random 
+}
+
+get_stars <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("ns")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  return("ns")
+}
+
+# Plot 
+
+plot_wm_bar <- ggplot(df_wm_bars, aes(x = Tissue, y = SMD)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+  geom_bar(stat = "identity", fill = c("#e85d04", "#fcb044"), width = 0.62, color = "black", linewidth = 0.9) +
+  
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.12, linewidth = 0.9, color = "black") +
+
+  geom_signif(
+    comparisons = list(c("White Matter\nLesions", "Normal Appearing\nWhite Matter")),
+    annotation = get_stars(p_wm_diff),
+    y_position = max(df_wm_bars$Upper) + 0.14,
+    tip_length = 0.03, 
+    size = 0.7,
+    textsize = 8, 
+    color = "black",
+    vjust = -0.3
+  ) +
+  
+  scale_x_discrete(
+    labels = c(
+      "Normal Appearing White Matter" = "Normal Appearing\nWhite Matter",
+      "White Matter Lesions" = "White Matter\nLesions")) +
+    scale_y_continuous(
+      name = expression(
+      atop(
+        "MS - Control Effect Size",
+        paste("(Cohen's ", italic(d), " " %+-% " 95% CI)")
+      )
+    ),
+    limits = c(-0.82, 0.84),                    
+    breaks = seq(-0.8, 0.8, by = 0.4),         
+    expand = c(0, 0),
+    labels = function(x) sprintf("%.1f", x)
+  ) +
+  labs(x = "") +
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA), plot.background = element_rect(fill = "white", color = NA),
+    axis.line.x = element_line(color = "black", linewidth = 0.6),
+    axis.line.y = element_line(color = "black", linewidth = 0.6),
+    axis.text.x = element_text(color = "black", size = 17.5),
+    axis.text.y = element_text(color = "black", size = 15),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.text = element_text(color = "black"), 
+    axis.title.y = element_text(size = 19, margin = margin(t = 0, r = 15, b = 0, l = 0)),
+    axis.title.x = element_text()
+  )
+
+ggsave(file.path(results_dir, "forest_plots", "White_Matter_Panel_1_Barplot.pdf"), plot = plot_wm_bar, width = 6.5, height = 6.5)
+
+### Combined forest plot ###
+
+pdf(file.path(results_dir, "forest_plots", "White_Matter_Combined_Forest.pdf"), width = 8, height = 10)
+
+study_colors <- case_when(
+  df_wm_processed$Brain_Region_Grouping == "White Matter Lesions"          ~ "#e85d04",
+  df_wm_processed$Brain_Region_Grouping == "Normal Appearing White Matter" ~ "#fcb044",
+  TRUE ~ "black"
+)
+
+forest(m_wm_joint, 
+       subgroup = TRUE,                   
+       xlim = c(-4, 4), 
+       at = c(-4, -2, 0, 2, 4), 
+       leftcols = c("studlab"),
+       leftlabs = c("Study"),
+       rightcols = c("effect", "ci", "w.random"),
+       rightlabs = c("Cohen's d", "95% CI", "Weight"),
+       subgroup.name = "",                
+       smlab = "White Matter",
+       text.stat = "Cohen's d",
+       col.square = study_colors,
+       col.square.lines = study_colors,
+       col.lines = "black",
+       col.diamond = "black",
+       col.diamond.lines = "black",
+       fs.hetstat = 8.5,
+       overall.hetstat = TRUE,            
+       subgroup.hetstat = TRUE,
+       resid.hetstat = FALSE,
+       test.subgroup = FALSE)
+
+dev.off()
+
+stats_file_path <- file.path(results_dir, "forest_plots", "White_Matter_Heterogeneity_Stats.txt")
+sink(stats_file_path)
+
+cat("META-ANALYSIS STATISTICAL REPORT: WHITE MATTER SPECTRUM\n")
+
+cat("--- 1. SUBGROUP-LEVEL ESTIMATES & HETEROGENEITY ---\n")
+print(summary(m_wm_joint))
+
+cat("\n\n--- 2. TEST FOR GLOBAL SUBGROUP DIFFERENCES ---\n")
+cat("Q-statistic (between groups):", m_wm_joint$Q.b.random, "\n")
+cat("Degrees of freedom:", m_wm_joint$df.Q.b.random, "\n")
+cat("Omnibus P-value:", p_wm_diff, " (", get_stars(p_wm_diff), ")\n\n", sep="")
+
+sink()
+
+```
+
+###### Cortical + Subcortical
+```{r}
+### Data cleaning/prep ###
+dataset_all <- dataset_all %>%
+  mutate(
+    Brain_Region_Lookup = toupper(trimws(Brain_Region_Grouping)),
+    
+    Brain_Region_Clean = case_when(
+      Brain_Region_Lookup == "NAWM" ~ "NAWM",
+      Brain_Region_Lookup == "WML" ~ "WML",
+      !is.na(Cortical) & trimws(Cortical) != "" ~ "Cortical",
+      !is.na(Sub_Cortical) & trimws(Sub_Cortical) != "" ~ "Subcortical",
+      TRUE ~ NA_character_  
+    )
+  )
+
+df_tissue_processed <- dataset_all %>% 
+  filter(Brain_Region_Clean %in% c("Cortical", "Subcortical")) %>%
+  mutate(
+    Brain_Region_Clean = factor(Brain_Region_Clean, levels = c("Cortical", "Subcortical")),
+    Study_Label = sub("(.*) ([0-9]{4}).*", "\\1, \\2", Study)
+  ) %>%
+  arrange(Brain_Region_Clean, Study_Label)
+
+### Run pooled model (with shared variance) ###
+
+m_tissue_joint <- metagen(
+  TE = SDM,                        
+  seTE = `SDM Std Err`,            
+  data = df_tissue_processed,          
+  studlab = Study_Label,
+  subgroup = Brain_Region_Clean,   
+  tau.common = TRUE,               
+  random = TRUE,
+  common = FALSE,
+  method.tau = "DL",
+  sm = "SMD"
+)
+
+### Summary bar plot ###
+
+extracted_smd <- m_tissue_joint$TE.random.w
+extracted_lower <- m_tissue_joint$lower.random.w
+extracted_upper <- m_tissue_joint$upper.random.w   
+extracted_pvalues <- m_tissue_joint$pval.random.w
+
+df_tissue_bars <- tibble(
+  Tissue  = c("Cortical", "Subcortical"),
+  SMD = c(as.numeric(extracted_smd["Cortical"]), as.numeric(extracted_smd["Subcortical"])),
+  Lower = c(as.numeric(extracted_lower["Cortical"]),  as.numeric(extracted_lower["Subcortical"])),
+  Upper = c(as.numeric(extracted_upper["Cortical"]), as.numeric(extracted_upper["Subcortical"])),
+  P_Value = c(as.numeric(extracted_pvalues["Cortical"]), as.numeric(extracted_pvalues["Subcortical"]))
+)
+
+df_tissue_bars <- df_tissue_bars %>%
+  mutate(
+    Tissue = factor(Tissue, levels = c("Cortical", "Subcortical"))
+  ) %>% 
+  arrange(Tissue)
+
+p_tissue_diff <- m_tissue_joint$pval.Q.b2.random
+if (length(p_tissue_diff) == 0 || is.null(p_tissue_diff)) {
+  p_tissue_diff <- m_tissue_joint$pval.Q.b.random 
+}
+
+get_stars <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("ns")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  return("ns")
+}
+
+# Plot 
+
+plot_tissue_bar <- ggplot(df_tissue_bars, aes(x = Tissue, y = SMD)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+  geom_bar(stat = "identity", fill = c("#05668d", "#a9def9"), width = 0.62, color = "black", linewidth = 0.9) +
+  
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.12, linewidth = 0.9, color = "black") +
+  
+  geom_signif(
+    comparisons = list(c("Cortical", "Subcortical")),
+    annotation = get_stars(p_tissue_diff),
+    y_position = max(df_tissue_bars$Upper) + 0.05,
+    tip_length = 0.03, 
+    size = 0.7,
+    textsize = 8, 
+    color = "black",
+    vjust = -0.6
+  ) +
+  
+  scale_y_continuous(
+    name = expression(
+      atop(
+        "MS - Control Effect Size",
+        paste("(Cohen's ", italic(d), " " %+-% " 95% CI)")
+      )
+    ),
+    limits = c(-0.52, 0.52),                    
+    breaks = seq(-0.5, 0.5, by = 0.1),         
+    expand = c(0, 0),
+    labels = function(x) sprintf("%.1f", x)                           
+  ) +
+  labs(x = "") + 
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA), 
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.line.x = element_line(color = "black", linewidth = 0.6),
+    axis.line.y = element_line(color = "black", linewidth = 0.6),
+    axis.text.x = element_text(color = "black", size = 17.5, lineheight = 0.9, margin = margin(t = 6)),
+    axis.text.y = element_text(color = "black", size = 15),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.title.y = element_text(size = 19, vjust = 0.5, margin = margin(t = 0, r = 15, b = 0, l = 0)),
+    axis.title.x = element_blank()
+  )
+
+ggsave(file.path(results_dir, "forest_plots", "Tissue_Panel_1_Barplot.pdf"), 
+       plot = plot_tissue_bar, width = 6.5, height = 6.5)
+
+
+### Combined forest plot ###
+
+pdf(file.path(results_dir, "forest_plots", "Tissue_Combined_Forest.pdf"), width = 8, height = 14)
+
+study_colors <- case_when(
+  df_tissue_processed$Brain_Region_Clean == "Cortical"    ~ "#05668d",
+  df_tissue_processed$Brain_Region_Clean == "Subcortical" ~ "#a9def9",
+  TRUE ~ "black"
+)
+
+forest(m_tissue_joint, 
+       subgroup = TRUE,                   
+       xlim = c(-4, 4), 
+       at = c(-4, -2, 0, 2, 4), 
+       leftcols = c("studlab"),
+       leftlabs = c("Study"),
+       subgroup.name = "",                
+       smlab = "Grey Matter Analysis", 
+       col.square = study_colors,
+       col.square.lines = study_colors,
+       col.lines = "black",
+       col.diamond = "black",
+       col.diamond.lines = "black",
+       fs.hetstat = 8.5,
+       overall.hetstat = TRUE,            
+       subgroup.hetstat = TRUE,
+       resid.hetstat = FALSE,
+       test.subgroup = FALSE )
+
+dev.off()
+
+stats_file_path <- file.path(results_dir, "forest_plots", "Tissue_Heterogeneity_Stats.txt")
+sink(stats_file_path)
+
+cat("META-ANALYSIS STATISTICAL REPORT: CORTICAL VS SUBCORTICAL SPECTRUM\n")
+
+cat("--- 1. SUBGROUP-LEVEL ESTIMATES & HETEROGENEITY ---\n")
+print(summary(m_tissue_joint))
+
+cat("\n\n--- 2. TEST FOR GLOBAL SUBGROUP DIFFERENCES ---\n")
+cat("Q-statistic (between groups):", m_tissue_joint$Q.b.random, "\n")
+cat("Degrees of freedom:", m_tissue_joint$df.Q.b.random, "\n")
+cat("Omnibus P-value:", p_tissue_diff, " (", get_stars(p_tissue_diff), ")\n\n", sep="")
+
+sink()
+
+```
+
+##### Figure 4: MS Subtype
+```{r}
+### Data prep ###
+
+df_ms_processed <- dataset_all %>% 
+  filter(Dx_Only %in% c("RRMS", "PPMS", "SPMS")) %>%
+  mutate(
+    Dx_Only = case_when(
+      Dx_Only == "PPMS" ~ "Primary Progressive",
+      Dx_Only == "RRMS" ~ "Relapsing Remitting",
+      Dx_Only == "SPMS" ~ "Secondary Progressive",
+      TRUE ~ as.character(Dx_Only)
+    ),
+    Dx_Only = factor(Dx_Only, levels = c("Primary Progressive", "Relapsing Remitting", "Secondary Progressive")),
+    Study_Label = sub("(.*) ([0-9]{4}).*", "\\1, \\2", Study)
+  ) %>%
+  arrange(Dx_Only, Study_Label)
+
+### Run model ###
+
+m_ms_joint <- metagen(
+  TE = SDM,                        
+  seTE = `SDM Std Err`,            
+  data = df_ms_processed,          
+  studlab = Study_Label,
+  subgroup = Dx_Only,           
+  tau.common = TRUE,                
+  random = TRUE,
+  common = FALSE,
+  method.tau = "DL",
+  sm = "SMD"
+)
+
+### Summary bar plot ###
+
+extracted_smd <- m_ms_joint$TE.random.w
+extracted_lower <- m_ms_joint$lower.random.w
+extracted_upper <- m_ms_joint$upper.random.w   
+extracted_pvalues <- m_ms_joint$pval.random.w
+
+df_ms_bars <- tibble(
+  Subtype = c("Primary Progressive", "Relapsing Remitting", "Secondary Progressive"),
+  SMD = c(as.numeric(extracted_smd["Primary Progressive"]), as.numeric(extracted_smd["Relapsing Remitting"]), as.numeric(extracted_smd["Secondary Progressive"])),
+  Lower = c(as.numeric(extracted_lower["Primary Progressive"]),  as.numeric(extracted_lower["Relapsing Remitting"]),  as.numeric(extracted_lower["Secondary Progressive"])),
+  Upper = c(as.numeric(extracted_upper["Primary Progressive"]), as.numeric(extracted_upper["Relapsing Remitting"]), as.numeric(extracted_upper["Secondary Progressive"])),
+  P_Value = c(as.numeric(extracted_pvalues["Primary Progressive"]), as.numeric(extracted_pvalues["Relapsing Remitting"]), as.numeric(extracted_pvalues["Secondary Progressive"]))
+)
+
+df_ms_bars <- df_ms_bars %>%
+  mutate(
+    Subtype = factor(Subtype, levels = c("Primary Progressive", "Relapsing Remitting", "Secondary Progressive"))
+  ) %>% 
+  arrange(Subtype)
+
+calc_pairwise_p <- function(g1, g2, model) {
+  te1 <- model$TE.random.w[g1]
+  te2 <- model$TE.random.w[g2]
+  se1 <- model$seTE.random.w[g1]
+  se2 <- model$seTE.random.w[g2]
+  z <- (te1 - te2) / sqrt(se1^2 + se2^2)
+  p <- 2 * (1 - pnorm(abs(z)))
+  return(p)
+}
+
+p_ppms_rrms <- calc_pairwise_p("Primary Progressive", "Relapsing Remitting", m_ms_joint)
+p_rrms_spms <- calc_pairwise_p("Relapsing Remitting", "Secondary Progressive", m_ms_joint)
+p_ppms_spms <- calc_pairwise_p("Primary Progressive", "Secondary Progressive", m_ms_joint)
+
+get_stars <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("") 
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  return("") 
+}
+
+get_stars_comparisons <- function(p) {
+  if (length(p) == 0 || is.na(p)) return("ns")
+  if (p < 0.001) return("***")
+  if (p < 0.01)  return("**")
+  if (p < 0.05)  return("*")
+  return("ns")
+}
+
+max_upper_bound <- max(df_ms_bars$Upper)
+
+plot_ms_bar <- ggplot(df_ms_bars, aes(x = Subtype, y = SMD)) +
+  geom_hline(yintercept = 0, color = "black", linewidth = 0.5) +
+   geom_bar(stat = "identity", fill = c("#832161", "#b34d8f", "#e0a6cc"), width = 0.62, color = "black", linewidth = 0.9) +
+  
+  geom_errorbar(aes(ymin = Lower, ymax = Upper), width = 0.12, linewidth = 0.9, color = "black") +
+  
+  annotate(
+    "text", 
+    x = Inf, 
+    y = Inf, 
+    label = "No significant group differences", 
+    hjust = 1.1, 
+    vjust = 1.5, 
+    size = 4.5,  
+    color = "black"
+  ) +
+  
+  scale_x_discrete(
+    labels = c(
+      "Primary Progressive" = "Primary\nProgressive",
+      "Relapsing Remitting" = "Relapsing\nRemitting",
+      "Secondary Progressive" = "Secondary\nProgressive"
+    )
+  ) +
+  
+  scale_y_continuous(
+    name = expression(
+      atop(
+        "MS - Control Effect Size",
+        paste("(Cohen's ", italic(d), " " %+-% " 95% CI)")
+      )
+    ),
+    limits = c(-0.62, 0.62),                    
+    breaks = seq(-0.6, 6 , by = 0.3),         
+    expand = c(0, 0),
+    labels = function(x) sprintf("%.1f", x)                               
+  ) +
+  
+  labs(x = "") + 
+  theme_minimal(base_size = 14) +
+  theme(
+    panel.grid.major = element_blank(),
+    panel.grid.minor = element_blank(),
+    panel.background = element_rect(fill = "white", color = NA), 
+    plot.background = element_rect(fill = "white", color = NA),
+    axis.line.x = element_line(color = "black", linewidth = 0.6),
+    axis.line.y = element_line(color = "black", linewidth = 0.6),
+    axis.text.x = element_text(color = "black", size = 19, lineheight = 0.9, margin = margin(t = 6)),
+    axis.text.y = element_text(color = "black", size = 17.5),
+    axis.ticks = element_line(color = "black", linewidth = 0.6),
+    axis.title.y = element_text(size = 22, vjust = 0.5, margin = margin(t = 0, r = 15, b = 0, l = 0)),
+    axis.title.x = element_blank()
+  )
+
+ggsave(file.path(results_dir, "forest_plots", "MS_Subtype_Panel_1_Barplot.pdf"), 
+       plot = plot_ms_bar, width = 7, height = 7)
+
+
+### Forest plot ###
+
+pdf(file.path(results_dir, "forest_plots", "MS_Subtypes_Combined_Forest.pdf"), width = 10, height = 20)
+
+study_colors <- case_when(
+  df_ms_processed$Dx_Only == "Primary Progressive"   ~ "#832161",
+  df_ms_processed$Dx_Only == "Relapsing Remitting"   ~ "#b34d8f",
+  df_ms_processed$Dx_Only == "Secondary Progressive" ~ "#e0a6cc",
+  TRUE ~ "black"
+)
+
+forest(m_ms_joint, 
+       subgroup = TRUE,                   
+       xlim = c(-4, 4), 
+       at = c(-4, -2, 0, 2, 4), 
+       leftcols = c("studlab"),
+       leftlabs = c("Study"),
+       
+       print.subgroup.labels = TRUE,
+       subgroup.name = "", 
+       rightcols = c("effect", "ci", "w.random"), 
+       rightlabs = c("Cohen's d", "95%-CI", "Weight"),
+       smlab = "MS Subtype", 
+       col.square = study_colors,
+       col.square.lines = study_colors,
+       col.lines = "black",
+       col.diamond = "black",
+       col.diamond.lines = "black",
+       addrow.subgroups = TRUE,
+       fs.hetstat = 8.5,
+       overall.hetstat = TRUE,            
+       subgroup.hetstat = TRUE,
+       resid.hetstat = FALSE,
+       test.subgroup = FALSE                
+)
+
+dev.off()
+
+stats_file_path <- file.path(results_dir, "forest_plots", "MS_Subtypes_Heterogeneity_Stats.txt")
+sink(stats_file_path)
+
+cat("META-ANALYSIS STATISTICAL REPORT: MS SUBTYPES\n")
+
+cat("--- 1. SUBGROUP-LEVEL ESTIMATES & HETEROGENEITY ---\n")
+print(summary(m_ms_joint))
+
+cat("\n\n--- 2. TEST FOR GLOBAL SUBGROUP DIFFERENCES ---\n")
+cat("Q-statistic (between groups):", m_ms_joint$Q.b.random, "\n")
+cat("Degrees of freedom:", m_ms_joint$df.Q.b.random, "\n")
+cat("Omnibus P-value:", m_ms_joint$pval.Q.b.random, "\n\n")
+
+cat("--- 3. PAIRWISE POST-HOC WALD TESTS ---\n")
+cat("PPMS vs RRMS P-value:", p_ppms_rrms, " (", get_stars_comparisons(p_ppms_rrms), ")\n", sep="")
+cat("RRMS vs SPMS P-value:", p_rrms_spms, " (", get_stars_comparisons(p_rrms_spms), ")\n", sep="")
+cat("PPMS vs SPMS P-value:", p_ppms_spms, " (", get_stars_comparisons(p_ppms_spms), ")\n", sep="")
+
+sink()
+    
+```
+
+##### Figure 5: Anxiety, Depression, EDSS
+```{r}
+##### ANXIETY #####
+### Calculate harmonized scale ###
+
+dataset_all <- dataset_all %>%
+  mutate(Anxiety_Harmonized_4Tier = case_when(
+    !is.na(DASS21_A_case_mean) & DASS21_A_case_mean <= 4  ~ (DASS21_A_case_mean / 4) * 0.25,
+    !is.na(DASS21_A_case_mean) & DASS21_A_case_mean <= 6  ~ 0.25 + ((DASS21_A_case_mean - 4) / 2) * 0.25,
+    !is.na(DASS21_A_case_mean) & DASS21_A_case_mean <= 10 ~ 0.50 + ((DASS21_A_case_mean - 6) / 4) * 0.25,
+    !is.na(DASS21_A_case_mean) & DASS21_A_case_mean <= 21 ~ 0.75 + ((DASS21_A_case_mean - 10) / 11) * 0.25,
+    !is.na(HADS_A_case_mean) & HADS_A_case_mean <= 7  ~ (HADS_A_case_mean / 7) * 0.25,
+    !is.na(HADS_A_case_mean) & HADS_A_case_mean <= 10 ~ 0.25 + ((HADS_A_case_mean - 7) / 3) * 0.25,
+    !is.na(HADS_A_case_mean) & HADS_A_case_mean <= 14 ~ 0.50 + ((HADS_A_case_mean - 10) / 4) * 0.25,
+    !is.na(HADS_A_case_mean) & HADS_A_case_mean <= 21 ~ 0.75 + ((HADS_A_case_mean - 14) / 7) * 0.25,
+    TRUE ~ NA_real_
+  ))
+
+tissue_column_name <- "Brain_Region_Clean"
+target_tissues <- c("Cortical", "Subcortical")
+tissue_colors <- c("Cortical" = "#05668d", "Subcortical" = "#a9def9")
+
+combined_data_anx <- dataset_all %>% 
+  filter(!!sym(tissue_column_name) %in% target_tissues) %>%
+  filter(!is.na(Anxiety_Harmonized_4Tier) & !is.na(SDM) & !is.na(`SDM Std Err`)) %>%
+  mutate(Precision_Weight = 1 / (`SDM Std Err` ^ 2))
+
+### Meta-regression ###
+
+if (nrow(combined_data_anx) > 2) {
+  
+  anxiety_pipelines <- run_continuous_regression_pipeline(
+    df = combined_data_anx,
+    moderator = "Anxiety_Harmonized_4Tier",
+    moderator_name = "Harmonized MS Anxiety Severity (Cortical & Subcortical)",
+    results_dir = results_dir
+  )
+  
+  # Print out stats
+  df_clean_anx <- combined_data_anx %>%
+    filter(!is.na(Anxiety_Harmonized_4Tier)) %>%
+    mutate(temp_mod = as.numeric(Anxiety_Harmonized_4Tier)) %>%
+    filter(!is.na(temp_mod))
+
+  # Run the meta-regression model from the pipeline
+  reg_overall_anx <- metafor::rma(
+    yi = SDM, 
+    sei = `SDM Std Err`, 
+    mods = ~ temp_mod, 
+    data = df_clean_anx, 
+    method = "DL"
+  )
+
+  beta_val <- reg_overall_anx$b[2, 1]   
+  ci_lb <- reg_overall_anx$ci.lb[2]         
+  ci_ub <- reg_overall_anx$ci.ub[2]
+  p_val <- reg_overall_anx$pval[2]         
+  r2_val <- reg_overall_anx$R2                   
+
+  p_str <- if (p_val < 0.001) "p < 0.001" else sprintf("p = %.3f", p_val)
+
+  cat(sprintf("Beta (Slope) : %.3f [95%% CI: %.2f to %.2f]\n", beta_val, ci_lb, ci_ub))
+  cat(sprintf("p-value      : %s (raw: %.4f)\n", p_str, p_val))
+  cat(sprintf("R^2 (%%)     : %.1f%%\n", r2_val))
+  
+  plot_anx <- ggplot(combined_data_anx, aes(x = Anxiety_Harmonized_4Tier, y = SDM)) +
+    stat_smooth(
+      method = "lm", 
+      formula = y ~ x, 
+      aes(weight = Precision_Weight), 
+      fullrange = TRUE, 
+      alpha = 0.07, 
+      fill = "black", 
+      color = "black", 
+      linewidth = 0.6,
+      geom = "smooth",
+      xseq = seq(0, 1, length.out = 200) 
+    ) +
+    geom_point(aes(size = Precision_Weight, color = !!sym(tissue_column_name)), alpha = 0.7) +
+
+    annotate(
+      "text", 
+      x = 0.02, y = 4.0, 
+      label = "β = 3.42  |  p = 0.001  |  R² = 63.5%", 
+      hjust = 0, vjust = 1, 
+      size = 4.2, color = "black"
+    ) +
+    
+    scale_color_manual(name = "Tissue Type", values = tissue_colors) +
+    guides(size = "none") +
+    
+    scale_x_continuous(
+      breaks = seq(0, 1, by = 0.25),
+      labels = c("0", "0.25", "0.50", "0.75", "1")
+    ) + 
+    scale_y_continuous(
+      name = expression(paste("MS – Control Effect Size\n(Cohen's ", italic(d), ")")),
+      breaks = seq(-3, 4, by = 1)
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(-3, 4), clip = "off") +
+    labs(x = "Harmonized Anxiety Severity") +
+    
+    annotate("segment", x = 0.0, xend = 1.0, y = -4.8, yend = -4.8,
+             arrow = arrow(length = unit(0.2, "cm"), ends = "both", type = "closed"),
+             color = "black", linewidth = 0.6) +
+    annotate("text", x = 0.02, y = -5.3, label = "Asymptomatic", hjust = 0, size = 5, fontface = "plain") +
+    annotate("text", x = 0.98, y = -5.3, label = "Symptomatic", hjust = 1, size = 5, fontface = "plain") +
+    
+    theme_classic(base_size = 13) + 
+    theme(
+      legend.position = "none",
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text.x = element_text(size = 13, color = "black"),
+      axis.text.y = element_text(size = 13, color = "black"),
+      axis.title.y = element_text(size = 19),
+      axis.title.x = element_text(margin = margin(t = 8, b = 25), size = 17),
+      plot.margin = margin(t = 10, r = 10, b = 45, l = 10)
+    )
+  
+  ggsave(
+    filename = file.path(results_dir, "Harmonized_MS_Anxiety_Cortical_Subcortical_Combined.png"),
+    plot     = plot_anx, width = 8, height = 5.5, dpi = 300
+  )
+}
+
+##### DEPRESSION #####
+### Create harmonized depression scale ###
+
+dataset_all <- dataset_all %>%
+  mutate(Depression_Harmonized_4Tier = case_when(
+    !is.na(DASS21_D_case_mean) & DASS21_D_case_mean <= 4  ~ (DASS21_D_case_mean / 4) * 0.25,
+    !is.na(DASS21_D_case_mean) & DASS21_D_case_mean <= 6  ~ 0.25 + ((DASS21_D_case_mean - 4) / 2) * 0.25,
+    !is.na(DASS21_D_case_mean) & DASS21_D_case_mean <= 10 ~ 0.50 + ((DASS21_D_case_mean - 6) / 4) * 0.25,
+    !is.na(DASS21_D_case_mean) & DASS21_D_case_mean <= 21 ~ 0.75 + ((DASS21_D_case_mean - 10) / 11) * 0.25,
+    !is.na(HADS_D_case_mean) & HADS_D_case_mean <= 7  ~ (HADS_D_case_mean / 7) * 0.25,
+    !is.na(HADS_D_case_mean) & HADS_D_case_mean <= 10 ~ 0.25 + ((HADS_D_case_mean - 7) / 3) * 0.25,
+    !is.na(HADS_D_case_mean) & HADS_D_case_mean <= 14 ~ 0.50 + ((HADS_D_case_mean - 10) / 4) * 0.25,
+    !is.na(HADS_D_case_mean) & HADS_D_case_mean <= 21 ~ 0.75 + ((HADS_D_case_mean - 14) / 7) * 0.25,
+    TRUE ~ NA_real_
+  ))
+
+combined_data_dep <- dataset_all %>% 
+  filter(!!sym(tissue_column_name) %in% target_tissues) %>%
+  filter(!is.na(Depression_Harmonized_4Tier) & !is.na(SDM) & !is.na(`SDM Std Err`)) %>%
+  mutate(Precision_Weight = 1 / (`SDM Std Err` ^ 2)) 
+
+### Meta-regression ###
+if (nrow(combined_data_dep) > 2) {
+  
+  depression_pipelines <- run_continuous_regression_pipeline(
+    df = combined_data_dep,
+    moderator = "Depression_Harmonized_4Tier",
+    moderator_name = "Harmonized MS Depression Severity (Cortical & Subcortical)",
+    results_dir = results_dir
+  )
+  
+  ### DEPRESSION STATS ###
+  df_clean_dep <- combined_data_dep %>%
+    filter(!is.na(Depression_Harmonized_4Tier)) %>%
+    mutate(temp_mod = as.numeric(Depression_Harmonized_4Tier)) %>%
+    filter(!is.na(temp_mod))
+
+  # Run the meta-regression model from the pipeline
+  reg_overall_dep <- metafor::rma(
+    yi = SDM, 
+    sei = `SDM Std Err`, 
+    mods = ~ temp_mod, 
+    data = df_clean_dep, 
+    method = "DL"
+  )
+
+  beta_val_dep <- reg_overall_dep$b[2, 1]   
+  ci_lb_dep <- reg_overall_dep$ci.lb[2]         
+  ci_ub_dep <- reg_overall_dep$ci.ub[2]
+  p_val_dep <- reg_overall_dep$pval[2]              
+  r2_val_dep <- reg_overall_dep$R2                   
+
+  p_str_dep <- if (p_val_dep < 0.001) "p < 0.001" else sprintf("p = %.3f", p_val_dep)
+
+  cat(sprintf("Beta (Slope) : %.3f [95%% CI: %.2f to %.2f]\n", beta_val_dep, ci_lb_dep, ci_ub_dep))
+  cat(sprintf("p-value      : %s (raw: %.4f)\n", p_str_dep, p_val_dep))
+  cat(sprintf("R^2 (%%)     : %.1f%%\n", r2_val_dep))
+  
+  plot_dep <- ggplot(combined_data_dep, aes(x = Depression_Harmonized_4Tier, y = SDM)) +
+    geom_smooth(
+      method = "lm", 
+      formula = y ~ x, 
+      aes(weight = Precision_Weight), 
+      fullrange = TRUE, 
+      alpha = 0.07, 
+      fill = "black", 
+      color = "black", 
+      linewidth = 0.6,
+      geom = "smooth",
+      xseq = seq(0, 1, length.out = 200)
+    ) +
+    geom_point(aes(size = Precision_Weight, color = !!sym(tissue_column_name)), alpha = 0.7) +
+
+    annotate(
+      "text", 
+      x = 0.02, y = 4.0, 
+      label = "β = 2.47  |  p = 0.01  |  R² = 49.3%", 
+      hjust = 0, vjust = 1, 
+      size = 4.2,  color = "black"
+    ) +
+    
+    scale_color_manual(name = "Tissue Type", values = tissue_colors) +
+    guides(size = "none") +
+    
+    scale_x_continuous(
+      breaks = seq(0, 1, by = 0.25),
+      labels = c("0", "0.25", "0.50", "0.75", "1")
+    ) + 
+    scale_y_continuous(
+      name = expression(paste("MS – Control Effect Size (Cohen's ", italic(d), ")")),
+      breaks = seq(-3, 4, by = 1)
+    ) +
+    coord_cartesian(xlim = c(0, 1), ylim = c(-3, 4), clip = "off") +
+    labs(x = "Harmonized Depression Severity") +
+    
+    annotate("segment", x = 0.0, xend = 1.0, y = -4.8, yend = -4.8,
+             arrow = arrow(length = unit(0.2, "cm"), ends = "both", type = "closed"),
+             color = "black", linewidth = 0.6) +
+    annotate("text", x = 0.02, y = -5.3, label = "Asymptomatic", hjust = 0, size = 5, fontface = "plain") +
+    annotate("text", x = 0.98, y = -5.3, label = "Symptomatic", hjust = 1, size = 5, fontface = "plain") +
+    
+    theme_classic(base_size = 13) + 
+    theme(
+      legend.position = "none",
+      axis.title.y = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text.x = element_text(size = 13, color = "black"),
+      axis.text.y = element_text(size = 13, color = "black"),
+      axis.title.x = element_text(margin = margin(t = 8, b = 25), size = 17),
+      plot.margin = margin(t = 10, r = 10, b = 45, l = 10)
+    )
+  
+  ggsave(
+    filename = file.path(results_dir, "Harmonized_MS_Depression_Cortical_Subcortical_Combined.png"),
+    plot     = plot_dep, width = 8, height = 5.5, dpi = 300
+  )
+}
+
+#### EDSS ####
+
+combined_data_edss <- dataset_all %>% 
+  filter(!!sym(tissue_column_name) %in% target_tissues) %>%
+  mutate(EDSS_Numeric = as.numeric(EDSS_mean)) %>%
+  filter(!is.na(EDSS_Numeric) & !is.na(SDM) & !is.na(`SDM Std Err`)) %>%
+  mutate(Precision_Weight = 1 / (`SDM Std Err` ^ 2)) 
+
+### Meta-regression ###
+if (nrow(combined_data_edss) > 2) {
+  
+  edss_pipelines <- run_continuous_regression_pipeline(
+    df = combined_data_edss,
+    moderator = "EDSS_Numeric",
+    moderator_name = "EDSS Score (Cortical & Subcortical)",
+    results_dir = results_dir
+  )
+  
+  ### EDSS STATS ###
+  df_clean_edss <- combined_data_edss %>%
+    filter(!is.na(EDSS_Numeric)) %>%
+    mutate(temp_mod = as.numeric(EDSS_Numeric)) %>%
+    filter(!is.na(temp_mod))
+
+  # Run the meta-regression model from the pipeline
+  reg_overall_edss <- metafor::rma(
+    yi = SDM, 
+    sei = `SDM Std Err`, 
+    mods = ~ temp_mod, 
+    data = df_clean_edss, 
+    method = "DL"
+  )
+
+  beta_val_edss <- reg_overall_edss$b[2, 1]    
+  ci_lb_edss <- reg_overall_edss$ci.lb[2]         
+  ci_ub_edss <- reg_overall_edss$ci.ub[2]
+  p_val_edss <- reg_overall_edss$pval[2]              
+  r2_val_edss <- reg_overall_edss$R2                   
+
+  p_str_edss <- if (p_val_edss < 0.001) "p < 0.001" else sprintf("p = %.3f", p_val_edss)
+
+
+  cat(sprintf("Beta (Slope) : %.3f [95%% CI: %.2f to %.2f]\n", beta_val_edss, ci_lb_edss, ci_ub_edss))
+  cat(sprintf("p-value      : %s (raw: %.4f)\n", p_str_edss, p_val_edss))
+  cat(sprintf("R^2 (%%)     : %.1f%%\n", r2_val_edss))
+  
+  plot_edss <- ggplot(combined_data_edss, aes(x = EDSS_Numeric, y = SDM)) +
+    stat_smooth(
+      method = "lm", 
+      formula = y ~ x, 
+      aes(weight = Precision_Weight), 
+      fullrange = TRUE, 
+      alpha = 0.07, 
+      fill = "black", 
+      color = "black", 
+      linewidth = 0.6,
+      geom = "smooth",
+      xseq = seq(0, 10, length.out = 200) 
+    ) +
+    geom_point(aes(size = Precision_Weight, color = !!sym(tissue_column_name)), alpha = 0.7) +
+    
+    annotate(
+      "text", 
+      x = 0.2, y = 4.0, 
+      label = "β = -0.07  |  p = ns  |  R² = 0.0%", 
+      hjust = 0, vjust = 1, 
+      size = 4.2, color = "black"
+    ) +
+    
+    scale_color_manual(name = "Tissue Type", values = tissue_colors) +
+    guides(
+      color = guide_legend(override.aes = list(size = 5)), 
+      size = "none"
+    ) +
+    
+    scale_x_continuous(breaks = seq(0, 10, by = 2)) + 
+    scale_y_continuous(
+      name = expression(paste("MS – Control Effect Size (Cohen's ", italic(d), ")")),
+      breaks = seq(-3, 4, by = 1)
+    ) +
+    coord_cartesian(xlim = c(0, 10), ylim = c(-3, 4), clip = "off") +
+    labs(x = "EDSS Score") +
+    
+    annotate("segment", x = 0.0, xend = 10, y = -4.8, yend = -4.8,
+             arrow = arrow(length = unit(0.2, "cm"), ends = "both", type = "closed"),
+             color = "black", linewidth = 0.6) +
+    annotate("text", x = 0.2, y = -5.3, label = "No Disability", hjust = 0, size = 5, fontface = "plain") +
+    annotate("text", x = 9.8, y = -5.3, label = "Severe Disability", hjust = 1, size = 5, fontface = "plain") +
+    
+    theme_classic(base_size = 13) + 
+    theme(
+      legend.position = "right",
+      legend.box = "vertical",
+      legend.title = element_text(size = 16, face = "bold"),
+      legend.text = element_text(size = 14),
+      legend.key.size = unit(1, "cm"),
+      axis.title.y = element_blank(),
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text.x = element_text(size = 13, color = "black"),
+      axis.text.y = element_text(size = 13, color = "black"),
+      axis.title.x = element_text(margin = margin(t = 8, b = 25), size = 17),
+      plot.margin = margin(t = 10, r = 10, b = 45, l = 10)
+    )
+  
+  ggsave(
+    filename = file.path(results_dir, "EDSS_Cortical_Subcortical_Combined.png"),
+    plot     = plot_edss, width = 8, height = 5.5, dpi = 300
+  )
+}
+
+### 3-Panel plot ###
+
+if (exists("plot_anx") && exists("plot_dep") && exists("plot_edss")) {
+  
+  three_panel_horizontal <- (plot_anx | plot_dep | plot_edss) +
+    plot_annotation(tag_levels = 'A')                               
+  
+  ggsave(
+    filename = file.path(results_dir, "Clinical_Moderators_ThreePanel_Horizontal.pdf"),
+    plot     = three_panel_horizontal, width = 16, height = 5.8, dpi = 300
+  )
+}
+
+```
+# ----------------------------------------------
+### Supplemental Figures
+#### Publication Year (line at 2018)
+```{r}
+##### PUBLICATION YEAR META-REGRESSION #####
+
+palette_glu_glx <- c("Glu" = "#78a160", "Glx" = "#264a2e")
+
+# Filter and extract Publication Year
+combined_data_year <- dataset_all %>% 
+  filter(!is.na(Publication_Year) & !is.na(SDM) & !is.na(`SDM Std Err`)) %>%
+  mutate(
+    Year_Numeric     = as.numeric(Publication_Year),
+    Precision_Weight = 1 / (`SDM Std Err` ^ 2)
+  ) %>%
+  filter(!is.na(Year_Numeric))
+
+if (nrow(combined_data_year) > 2) {
+  
+  # Run Meta-Regression 
+  year_pipelines <- run_continuous_regression_pipeline(
+    df = combined_data_year,
+    moderator = "Year_Numeric",
+    moderator_name = "Publication Year",
+    results_dir = results_dir
+  )
+  
+  df_clean_year <- combined_data_year %>%
+    filter(!is.na(Year_Numeric)) %>%
+    mutate(temp_mod = as.numeric(Year_Numeric)) %>%
+    filter(!is.na(temp_mod))
+
+  reg_overall_year <- metafor::rma(
+    yi = SDM, 
+    sei = `SDM Std Err`, 
+    mods = ~ temp_mod, 
+    data = df_clean_year, 
+    method = "DL"
+  )
+
+  beta_val_year <- reg_overall_year$b[2, 1]              
+  p_val_year <- reg_overall_year$pval[2]      
+  r2_val_year <- max(0, reg_overall_year$R2)             
+
+  p_str_year <- if (p_val_year < 0.001) "p < 0.001" else paste0("p = ", sprintf("%.3f", p_val_year))
+
+  cat("  PUBLICATION YEAR PIPELINE STATS  \n")
+  cat(sprintf("Beta (Slope) : %.3f\n", beta_val_year))
+  cat(sprintf("p-value      : %s (raw: %.4f)\n", p_str_year, p_val_year))
+  cat(sprintf("R^2 (%%)     : %.1f%%\n", r2_val_year))
+
+  stats_line_year <- sprintf("β = %.2f, %s, R² = %.1f%%", beta_val_year, p_str_year, r2_val_year)
+
+  plot_year <- ggplot(combined_data_year, aes(x = Year_Numeric, y = SDM)) +
+    
+    geom_segment(
+      aes(x = 2018, xend = 2018, y = -Inf, yend = 1.8), 
+      linetype = "dashed", 
+      color = "grey30", 
+      linewidth = 0.8
+    ) +
+    
+    stat_smooth(
+      method = "lm", 
+      formula = y ~ x, 
+      aes(weight = Precision_Weight), 
+      fullrange = TRUE, 
+      alpha = 0.07, 
+      fill = "grey30", 
+      color = "black", 
+      linewidth = 0.8
+    ) +
+    
+    geom_point(
+      aes(size = Precision_Weight, color = Neurometabolite_Type), 
+      alpha = 0.7
+    ) +
+
+    annotate(
+      "text", 
+      x = 2006, y = 2, 
+      label = stats_line_year, 
+      hjust = 1, 
+      size = 4, 
+      color = "black"
+    ) +
+  
+    scale_color_manual(name = "Metabolite", values = palette_glu_glx) +
+    
+    scale_size_continuous(
+      name = expression(paste("Study Weight (", 1/SE^2, ")"))
+    ) +
+    guides(
+      size = guide_legend(override.aes = list(color = "grey50", fill = "grey50", alpha = 0.8))
+    ) +
+    
+    scale_x_continuous(
+      name = "Publication Year",
+      breaks = c(1993, 2000, 2006, 2012, 2018, 2025),
+      limits = c(1991, 2027),
+      expand = c(0, 0)
+    ) + 
+    
+    scale_y_continuous(
+      name = expression(paste("MS - Control Effect Size\n(Cohen's ", italic(d), ")")),
+      breaks = seq(-3, 2, by = 1)
+    ) +
+    
+    coord_cartesian(xlim = c(1991, 2027), ylim = c(-3, 2), clip = "off") +
+    
+    theme_classic(base_size = 14) + 
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text.x = element_text(size = 15, color = "black"),
+      axis.text.y = element_text(size = 15, color = "black"),
+      axis.title.y = element_text(size = 19, color = "black", margin = margin(r = 15)),
+      axis.title.x = element_text(size = 19, color = "black", margin = margin(t = 10)),
+      plot.margin = margin(t = 15, r = 15, b = 15, l = 30),
+      legend.position = "right",
+      legend.box = "vertical",
+    )
+
+  ggsave(
+    filename = file.path(results_dir, "Publication_Year_new.pdf"),
+    plot = plot_year, 
+    width = 10, 
+    height = 5.2, 
+    dpi = 300
+  )
+}
+
+```
+
+#### Glutamate Forest Plot
+```{r}
+##### FOREST PLOT: GLUTAMATE (GLU) ONLY #####
+
+# Run Meta-Analysis for Glutamate
+meta_glu_single <- metagen(
+  TE = SDM,
+  seTE = `SDM Std Err`,
+  data = dataset_glu,
+  studlab = sub("(\\d{4})[a-z]+$", "\\1", Study),
+  common = FALSE,
+  random = TRUE,
+  method.tau = "DL",
+  sm = "SMD"
+)
+
+pdf_file <- file.path(results_dir, "Forest_Plot_Glutamate_Only.pdf")
+
+pdf(pdf_file, width = 8, height = 14)
+
+# Forest Plot
+forest(
+  meta_glu_single,
+  smlab = "Glutamate",
+  sortvar = Study,             
+  prediction = FALSE,          
+  print.subgroup.name = FALSE,
+  xlim = c(-3, 2),
+  col.square = "#78a160",    
+  col.square.lines = "#78a160",    
+  col.diamond = "black",     
+  col.diamond.lines = "black",
+  col.study = "black",
+  leftcols = c("studlab"),
+  leftlabs = c("Study"),
+  rightcols = c("effect", "ci", "w.random"),
+  rightlabs = c("Cohen's d", "95% CI", "Weight"),
+  fs.heading = 13,
+  fs.study = 11,
+  fs.summary = 11,
+  spacing = 1.0,
+  squaresize = 0.8
+)
+
+dev.off()
+
+```
+
+#### Glutamate+Glutamine Forest Plot
+```{r}
+##### FOREST PLOT: Glutamate+Glutamine ONLY #####
+
+# Run Meta-Analysis
+meta_glx_single <- metagen(
+  TE = SDM,
+  seTE = `SDM Std Err`,
+  data = dataset_glx,
+  #studlab = Study,
+  studlab = sub("(\\d{4})[a-z]+$", "\\1", Study),
+  common = FALSE,
+  random = TRUE,
+  method.tau = "DL",
+  sm = "SMD"
+)
+
+pdf_file <- file.path(results_dir, "Forest_Plot_Glx_Only.pdf")
+
+pdf(pdf_file, width = 8, height = 8)
+
+# Forest Plot
+forest(
+  meta_glx_single,
+  smlab = "Glutamate+Glutamine",
+  plotmethod = "grid",
+  sortvar = Study,             
+  prediction = FALSE,          
+  print.subgroup.name = FALSE,
+  xlim = c(-3, 2),
+  col.square = "#264a2e",   
+  col.square.lines = "#264a2e",
+  col.diamond = "black",     
+  col.diamond.lines = "black",
+  col.study = "black",
+  leftcols = c("studlab"),
+  leftlabs = c("Study"),
+  rightcols = c("effect", "ci", "w.random"),
+  rightlabs = c("Cohen's d", "95% CI", "Weight"),
+  fs.heading = 13,
+  fs.study = 11,
+  fs.summary = 11,
+  spacing = 1.0,
+  squaresize = 0.8
+)
+
+dev.off()
+
+```
+
+
+#### Disease Duration
+```{r}
+##### META-REGRESSION: METABOLITE EFFECT SIZE BY DISEASE DURATION #####
+
+palette_glu_glx <- c("Glu" = "#78a160", "Glx" = "#264a2e")
+
+glu_duration_data <- dataset_all %>%
+  filter(!is.na(SDM) & !is.na(`SDM Std Err`)) %>%
+  filter(!is.na(Mean_Disease_duration)) %>%
+  mutate(
+    Duration_Years   = as.numeric(Mean_Disease_duration),
+    Precision_Weight = 1 / (`SDM Std Err` ^ 2)
+  ) %>%
+  filter(!is.na(Duration_Years))
+
+if (nrow(glu_duration_data) > 0) {
+  
+  meta_reg <- rma(
+    yi = SDM, 
+    sei = `SDM Std Err`, 
+    mods = ~ Duration_Years, 
+    data = glu_duration_data, 
+    method = "DL"
+  )
+  
+  beta_val <- meta_reg$b[2]             
+  p_val <- meta_reg$pval[2]           
+  r2_val <- max(0, meta_reg$R2)       
+  
+  p_string <- if (p_val < 0.001) "p < 0.001" else paste0("p = ", sprintf("%.3f", p_val))
+  
+  stats_label <- sprintf("β = %.2f, %s, R² = %.1f%%", beta_val, p_string, r2_val)
+
+  plot_glu_duration <- ggplot(glu_duration_data, aes(x = Duration_Years, y = SDM)) +
+    
+    stat_smooth(
+      method = "lm", 
+      formula = y ~ x, 
+      aes(weight = Precision_Weight), 
+      fullrange = TRUE, 
+      alpha = 0.07,
+      fill = "grey30", 
+      color = "black", 
+      linewidth = 0.8
+    ) +
+    
+    geom_point(
+      aes(size = Precision_Weight, color = Neurometabolite_Type), 
+      alpha = 0.7
+    ) +
+    
+    annotate(
+      "text",
+      x = 7, y = 2,                 
+      label = stats_label,
+      hjust = 1,                       
+      size = 4,
+      color = "black"
+    ) +
+    
+    scale_color_manual(name = "Metabolite", values = palette_glu_glx) +
+    
+    scale_size_continuous(
+      name = expression(paste("Study Weight (", 1/SE^2, ")"))
+    ) +
+    guides(
+      size = guide_legend(override.aes = list(color = "grey50", fill = "grey50", alpha = 0.8))
+    ) +
+    
+    scale_x_continuous(
+      name = "Disease Duration (Years)",
+      limits = c(0, 21),
+      breaks = seq(0, 20, by = 5),
+      expand = c(0, 0)
+    ) + 
+    
+    scale_y_continuous(
+      name = expression(paste("MS - Control Effect Size\n(Cohen's ", italic(d), ")")),
+      breaks = seq(-3, 2, by = 1)
+    ) +
+    
+    coord_cartesian(xlim = c(0, 21), ylim = c(-3, 2), clip = "off") +
+    
+    theme_classic(base_size = 14) + 
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text.x = element_text(size = 15, color = "black"),
+      axis.text.y = element_text(size = 15, color = "black"),
+      axis.title.y = element_text(size = 19, color = "black", margin = margin(r = 15)),
+      axis.title.x = element_text(size = 19, color = "black", margin = margin(t = 10)),
+      plot.margin = margin(t = 15, r = 15, b = 15, l = 30),
+      legend.position = "right" 
+    )
+
+  ggsave(
+    filename = file.path(results_dir, "Metabolites_MetaRegression_Disease_Duration.pdf"),
+    plot = plot_glu_duration, 
+    width = 10, 
+    height = 5.2, 
+    dpi = 300
+  )
+}
+```
+
+#### MRSQ Data Quality
+```{r}
+# DEFINE CRITERIA MAPPING
+criteria_map <- c(
+  "1" = "Tesla Strength", 
+  "2" = "Appropriate Sequence", 
+  "3" = "Adequate Parameters",
+  "4" = "Data Points", 
+  "5" = "Quality Measures", 
+  "6" = "Data Visualization",
+  "7" = "Partial Volume Correction", 
+  "8" = "Scanner Drift Report", 
+  "9" = "Power Calculation",
+  "10" = "Frequency/Phase Correction", 
+  "11" = "Software/Analysis"
+)
+
+# Data prep ans scoring
+quality_data <- dataset_all %>%
+  mutate(Study_Clean = str_extract(Study, ".*\\d{4}")) %>%
+  distinct(Study_ID, .keep_all = TRUE) %>% 
+  mutate(
+    p1 = if_else(Scan_Strength_MRSQ %in% c("3T", "7T"), 1, 0, missing = 0),
+    p2 = if_else(str_detect(coalesce(Sequence_MRSQ, ""), regex("PRESS|MEGA|LASER|STEAM", ignore_case = TRUE)), 1, 0, missing = 0),
+    p3 = if_else(Scan_Parameters_YN_MRSQ == "Y", 1, 0, missing = 0),
+    p4 = if_else(Data_Points_YN == "Y", 1, 0, missing = 0),
+    p5 = if_else(Quality_Measures_YN_MRSQ == "Y", 1, 0, missing = 0),
+    p6 = if_else(Data_Visualization_YN_MRSQ == "Y", 1, 0, missing = 0),
+    p7 = if_else(Partial_Vol_Correction_YN_MRSQ == "Y", 1, 0, missing = 0),
+    p8 = if_else(Scanner_Drift_YN_MRSQ == "Y", 1, 0, missing = 0),
+    p9 = if_else(Power_calculation_YN_MRSQ == "Y", 1, 0, missing = 0),
+    p10 = if_else(Freq_Phase_Correction_YN_MRSQ == "Y", 1, 0, missing = 0),
+    p11 = if_else(Analysis_YN_MRSQ == "Y", 1, 0, missing = 0)
+  ) %>%
+  mutate(
+    Total_Score = rowSums(select(., p1:p11), na.rm = TRUE)
+  ) %>%
+  arrange(Study_Clean) %>%
+  mutate(Study_ID = factor(Study_ID, levels = rev(unique(Study_ID))))
+
+study_label_map <- setNames(quality_data$Study_Clean, quality_data$Study_ID)
+
+matrix_long <- quality_data %>%
+  select(Study_ID, Study_Clean, p1:p11) %>%
+  pivot_longer(cols = p1:p11, names_to = "Criteria_Num", values_to = "Score") %>%
+  mutate(
+    Criteria_Num = factor(str_remove(Criteria_Num, "p"), levels = 1:11),
+    Score_Label  = if_else(Score == 1, "Yes", "No")
+  )
+
+# Individual panels
+
+# Panel A: Criteria Assessment Matrix
+p_matrix <- ggplot(matrix_long, aes(x = Criteria_Num, y = Study_ID, fill = Score_Label)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  scale_y_discrete(expand = c(0, 0), labels = study_label_map) +
+  scale_x_discrete(position = "top", expand = c(0, 0)) +
+  scale_fill_manual(values = c("Yes" = "#90be6d", "No" = "#ae2012")) +
+  theme_minimal(base_size = 14) +
+  labs(title = NULL, x = NULL, y = NULL) +
+  theme(
+    axis.text.x = element_text(size = 13, face = "bold", color = "black"),
+    axis.text.y = element_text(size = 12, face = "bold", color = "black"),
+    panel.grid = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(t = 10, r = 2, b = 10, l = 10)
+  )
+
+# Panel B: Total Criteria Score Column
+p_quality <- ggplot(quality_data, aes(x = "Total", y = Study_ID, fill = Total_Score)) +
+  geom_tile(color = "white", linewidth = 0.8) +
+  geom_text(aes(label = Total_Score), color = "white", fontface = "bold", size = 4) +
+  scale_y_discrete(expand = c(0, 0)) +
+  scale_x_discrete(position = "top", expand = c(0, 0)) +
+  scale_fill_gradient(low = "#a9d6e5", high = "#01497c", limits = c(0, 11)) +
+  theme_minimal(base_size = 14) +
+  labs(title = NULL, x = NULL, y = NULL) +
+  theme(
+    axis.text.x = element_text(size = 13, face = "bold", color = "black"),
+    axis.text.y = element_blank(),
+    panel.grid = element_blank(),
+    legend.position = "none",
+    plot.margin = margin(t = 10, r = 10, b = 10, l = 2)
+  )
+
+# Panel C: Annotation Legend Key
+key_text <- paste(paste0(names(criteria_map), ". ", criteria_map), collapse = "\n")
+
+p_right_panel <- ggplot() +
+  # Point Earned Section
+  annotate("text", x = 0, y = 10.5, label = "Point Earned:", fontface = "bold", size = 4.5, hjust = 0) +
+  annotate("rect", xmin = 0, xmax = 0.2, ymin = 9.8, ymax = 10.1, fill = "#8cb369") +
+  annotate("text", x = 0.3, y = 9.95, label = "Yes", size = 4, hjust = 0) +
+  annotate("rect", xmin = 0, xmax = 0.2, ymin = 9.3, ymax = 9.6, fill = "#ae2012") +
+  annotate("text", x = 0.3, y = 9.45, label = "No", size = 4, hjust = 0) +
+  
+  # Total Criteria Scale Section 
+  annotate("text", x = 0, y = 8.5, label = "Total Score Scale:", fontface = "bold", size = 4.5, hjust = 0) +
+  annotate("text", x = 0, y = 7.5, label = "Total Score Scale", size = 3.8, hjust = 0) +
+  annotate("text", x = 0, y = 6.4, label = "Data Point Key:", fontface = "bold", size = 4.5, hjust = 0) +
+  annotate("text", x = 0, y = 3.0, label = key_text, size = 3.8, hjust = 0, vjust = 0.5, lineheight = 1.1) +
+  
+  
+  theme_void() + 
+  scale_x_continuous(limits = c(0, 2.5), expand = c(0, 0)) +
+  scale_y_continuous(limits = c(0, 11), expand = c(0, 0)) +
+  theme(plot.margin = margin(t = 10, r = 10, b = 10, l = 10))
+
+# Combinig all panels
+final_mrsq_plot <- (p_matrix + p_quality + p_right_panel) + 
+  plot_layout(widths = c(11, 1, 6)) +
+  plot_annotation(
+    title = "MRS-Q Assessment",
+    theme = theme(
+      plot.title = element_text(face = "bold", size = 20, hjust = 0.25, vjust = 1, margin = margin(b = 10))
+    )
+  )
+
+output_pdf <- file.path(results_dir, "MRS_Quality_Assessment_Final.pdf")
+
+ggsave(
+  filename = output_pdf, 
+  plot = final_mrsq_plot, 
+  width = 10, 
+  height = max(8, nrow(quality_data) * 0.3), 
+  dpi = 300,
+  device = "pdf"
+)
+
+```
+
+#### SDMT
+```{r}
+##### META-REGRESSION: SDMT SCORE VS METABOLITE EFFECT SIZE #####
+
+palette_glu_glx <- c("Glu" = "#78a160", "Glx" = "#264a2e")
+
+sdmt_smd_data <- dataset_all %>%
+  mutate(
+    SDMT_Score = as.numeric(SDMT_case_mean),
+    SDM = as.numeric(SDM),
+    SDM_SE = as.numeric(`SDM Std Err`)
+  ) %>%
+  filter(!is.na(SDM) & !is.na(SDM_SE) & !is.na(SDMT_Score)) %>%
+  mutate(
+    Precision_Weight = 1 / (SDM_SE ^ 2)
+  )
+
+if (nrow(sdmt_smd_data) > 0) {
+  
+  # Run Meta-Regression 
+  meta_reg <- rma(
+    yi = SDM, 
+    sei = SDM_SE, 
+    mods = ~ SDMT_Score, 
+    data = sdmt_smd_data, 
+    method = "DL"
+  )
+  
+  beta_val <- meta_reg$b[2]             
+  p_val <- meta_reg$pval[2]          
+  r2_val <- max(0, meta_reg$R2)       
+  
+  p_string <- if (p_val < 0.001) "p < 0.001" else paste0("p = ", sprintf("%.3f", p_val))
+  stats_label <- sprintf("β = %.2f, %s, R² = %.1f%%", beta_val, p_string, r2_val)
+
+  plot_sdmt_smd <- ggplot(sdmt_smd_data, aes(x = SDMT_Score, y = SDM)) +
+    
+    stat_smooth(
+      method = "lm", 
+      formula = y ~ x, 
+      aes(weight = Precision_Weight), 
+      fullrange = TRUE, 
+      alpha = 0.07, 
+      fill = "grey30", 
+      color = "black", 
+      linewidth = 1
+    ) +
+    
+    geom_point(
+      aes(size = Precision_Weight, color = Neurometabolite_Type), 
+      alpha = 0.7
+    ) +
+    
+    annotate(
+      "text",
+      x = 44, 
+      y = 2,
+      label = stats_label,
+      hjust = 1,
+      vjust = 1,
+      size = 4,
+      color = "black"
+    ) +
+    
+    scale_color_manual(name = "Metabolite", values = palette_glu_glx) +
+    
+    scale_size_continuous(
+      name = expression(paste("Study Weight (", 1/SE^2, ")"))
+    ) +
+    guides(
+      size = guide_legend(override.aes = list(color = "grey50", fill = "grey50", alpha = 0.8))
+    ) +
+    
+    scale_x_continuous(
+      name = "Mean SDMT Score (MS Patients)",
+      limits = c(40, 52),   
+      breaks = seq(40, 52, by = 2),
+      expand = c(0, 0)
+    ) + 
+    
+    scale_y_continuous(
+      name = expression(paste("MS - Control Effect Size\n(Cohen's ", italic(d), ")")),
+      limits = c(-3, 2),
+      breaks = seq(-3, 2, by = 1)
+    ) +
+    
+    coord_cartesian(clip = "off") +
+    
+    theme_classic(base_size = 14) + 
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      
+      axis.text.x = element_text(size = 15, color = "black"),
+      axis.text.y = element_text(size = 15, color = "black"),
+      axis.title.y = element_text(size = 19, color = "black", margin = margin(r = 10)),
+      axis.title.x = element_text(size = 19, color = "black", margin = margin(t = 10)),
+      
+      plot.margin = margin(t = 15, r = 15, b = 15, l = 30),
+      
+      legend.position = "right" 
+    )
+
+  ggsave(
+    filename = file.path(results_dir, "SDMT_vs_Metabolites_SMD_MetaRegression.pdf"),
+    plot = plot_sdmt_smd, 
+    width = 10, 
+    height = 5.2, 
+    dpi = 300
+  )
+}
+
+```
+
+#### Cognitive Fatigue 
+```{r}
+##### META-REGRESSION: MFIS-C SCORE VS METABOLITE EFFECT SIZE #####
+
+palette_glu_glx <- c("Glu" = "#78a160", "Glx" = "#264a2e")
+
+mfis_smd_data <- dataset_all %>%
+  mutate(
+    MFIS_Score = as.numeric(MFIS_C_case_mean),
+    SDM = as.numeric(SDM),
+    SDM_SE = as.numeric(`SDM Std Err`)
+  ) %>%
+  filter(!is.na(SDM) & !is.na(SDM_SE) & !is.na(MFIS_Score)) %>%
+  mutate(
+    Precision_Weight = 1 / (SDM_SE ^ 2)
+  )
+
+if (nrow(mfis_smd_data) > 0) {
+  
+  # Run Meta-Regression
+  meta_reg <- rma(
+    yi = SDM, 
+    sei = SDM_SE, 
+    mods = ~ MFIS_Score, 
+    data = mfis_smd_data, 
+    method = "DL"
+  )
+  
+  beta_val <- meta_reg$b[2]
+  p_val <- meta_reg$pval[2]
+  r2_val <- max(0, meta_reg$R2)
+  
+  p_string <- if (p_val < 0.001) "p < 0.001" else paste0("p = ", sprintf("%.3f", p_val))
+  stats_label <- sprintf("β = %.2f, %s, R² = %.1f%%", beta_val, p_string, r2_val)
+
+  pred_grid <- data.frame(MFIS_Score = seq(13.8, 17, length.out = 100))
+  preds <- predict(meta_reg, newmods = pred_grid$MFIS_Score)
+  
+  pred_df <- data.frame(
+    MFIS_Score = pred_grid$MFIS_Score,
+    fit = preds$pred,
+    ci.lb = preds$ci.lb,
+    ci.ub = preds$ci.ub
+  )
+
+  plot_mfis_smd <- ggplot(mfis_smd_data, aes(x = MFIS_Score, y = SDM)) +
+    
+    geom_ribbon(
+      data = pred_df,
+      aes(x = MFIS_Score, ymin = ci.lb, ymax = ci.ub),
+      inherit.aes = FALSE,
+      fill = "grey30",
+      alpha = 0.07
+    ) +
+    
+    geom_line(
+      data = pred_df,
+      aes(x = MFIS_Score, y = fit),
+      inherit.aes = FALSE,
+      color = "black",
+      linewidth = 0.8
+    ) +
+    
+    geom_point(
+      aes(size = Precision_Weight, color = Neurometabolite_Type), 
+      alpha = 0.7
+    ) +
+    
+    annotate(
+      "text",
+      x = 15, 
+      y = 3,
+      label = stats_label,
+      hjust = 1,
+      vjust = 1,
+      size = 4,
+      color = "black"
+    ) +
+    
+    scale_color_manual(name = "Metabolite", values = palette_glu_glx) +
+    
+    scale_size_continuous(
+      name = expression(paste("Study Weight (", 1/SE^2, ")"))
+    ) +
+    guides(
+      size = guide_legend(override.aes = list(color = "grey50", fill = "grey50", alpha = 0.8))
+    ) +
+    
+    scale_x_continuous(
+      name = "Mean MFIS-C Score (MS Cases)",
+      limits = c(13.8, 17),
+      breaks = seq(14, 17, by = 1),
+      expand = c(0, 0)
+    ) + 
+    
+    scale_y_continuous(
+      name = expression(paste("MS - Control Effect Size\n(Cohen's ", italic(d), ")")),
+      limits = c(-3, 3),
+      breaks = seq(-3, 3, by = 1)
+    ) +
+    
+    coord_cartesian(clip = "off") +
+    
+    theme_classic(base_size = 15) + 
+    theme(
+      panel.grid.major = element_blank(),
+      panel.grid.minor = element_blank(),
+      axis.line = element_line(color = "black", linewidth = 0.5),
+      axis.ticks = element_line(color = "black", linewidth = 0.5),
+      axis.text.x = element_text(size = 15, color = "black"),
+      axis.text.y = element_text(size = 15, color = "black"),
+      axis.title.y = element_text(size = 19, color = "black", margin = margin(r = 10)),
+      axis.title.x = element_text(size = 19, color = "black", margin = margin(t = 10)),
+      
+      plot.margin = margin(t = 15, r = 15, b = 15, l = 30),
+      
+      legend.position = "right" 
+    )
+
+  ggsave(
+    filename = file.path(results_dir, "MFIS_vs_Metabolites_SMD_MetaRegression.pdf"),
+    plot = plot_mfis_smd, 
+    width = 10, 
+    height = 5.2, 
+    dpi = 300
+  )
+}
+
+```
+
+# ----------------------------------------------
+### Funnel Plots
+```{r}
+contour_lvls <- c(0.9, 0.95, 0.99)
+col_contour  <- c("gray75", "gray85", "gray95")
+col_contour2 = c("#4682B4", "#6699CC", "#b3cee5") 
+legend_text  <- c("p < 0.1", "p < 0.05", "p < 0.01")
+
+# Ensure the sensitivity folder exists
+sens_dir <- file.path(results_dir, "Sensitivity_Tests")
+if (!dir.exists(sens_dir)) dir.create(sens_dir, recursive = TRUE)
+
+for (metabolite in all_metabolites) {
+  meta_result <- metab_metaresults[[metabolite]]
+  
+  if (is.null(meta_result)) next
+  
+  message(paste("Generating QA Funnel Plot for:", metabolite))
+  
+  pdf_path <- file.path(sens_dir, paste0("funnel_plot_", metabolite, ".pdf"))
+  pdf(pdf_path, width = 8, height = 7)
+  
+  par(las = 1, mar = c(5, 7, 4, 2), lwd = 2)
+  
+  meta::funnel(
+    meta_result, 
+    yaxis = "se", 
+    xlab = "Effect Size (Cohen's d)", 
+    main = paste0(metabolite),
+    comb.fixed = FALSE, 
+    comb.random = TRUE, 
+    lty.random = 1, 
+    pch = 21, 
+    col = "black", 
+    bg = "white",  
+    xlim = c(-2, 2), 
+    contour = contour_lvls, 
+    col.contour = col_contour2, 
+    studlab = FALSE,
+    cex.main = 2.2,   
+    cex.lab  = 1.8,  
+    cex.axis = 1.5,  
+    lwd = 2
+  )
+  
+  legend("topright", 
+         legend = legend_text, 
+         fill = col_contour2, 
+         title = "Significance", 
+         cex = 1.4,        
+         y.intersp = 1.2,  
+         x.intersp = 1.1,
+         bty = "o", 
+         bg = "white")
+  
+  dev.off()
+}
+
+```
+
+#### Begg Test
+<https://www.rdocumentation.org/packages/meta/versions/4.15-1/topics/metabias.meta>
+
+```{r}
+for (metabolite in all_metabolites) {
+  meta_result <- metab_metaresults[[metabolite]]
+  
+  if (is.null(meta_result)) {
+    message(paste("Skipping Begg's test for", metabolite, "- result not found."))
+    next
+  }
+
+  message(paste("Running Begg's Test for:", metabolite))
+
+  begg_file <- file.path(results_dir, paste0("begg_test_", metabolite, ".txt"))
+  
+  sink(begg_file)
+  
+  cat("Begg's Rank Correlation Test for Publication Bias \n")
+  cat("Metabolite:", metabolite, "\n\n")
+  
+  # metabias with method.bias = "rank" is the Begg's test
+  test_output <- metabias(meta_result, method.bias = "rank", correct = FALSE)
+  print(test_output)
+  
+  sink()
+}
+
+# Overall
+begg_file_overall <- file.path(results_dir, paste0("begg_test_overall.txt"))
+  
+  sink(begg_file_overall)
+  
+  cat("Begg's Rank Correlation Test for Publication Bias \n")
+  cat("Overall \n\n")
+  
+  test_output <- metabias(meta_results, method.bias = "rank", correct = FALSE)
+  print(test_output)
+  
+  sink()
+```
+
+#### Egger's Test and Trim & Fill
+<https://bookdown.org/MathiasHarrer/Doing_Meta_Analysis_in_R/smallstudyeffects.html>
+
+```{r}
+### Egger's Test ###
+
+  egger_file <- file.path(results_dir, paste0("eggers_test_overall.txt"))
+  
+  sink(egger_file)
+  cat("Egger's Test for Funnel Plot Asymmetry \n")
+  cat("Overall \n\n")
+  
+  # metamerge/metabias logic: method.bias = "linreg" is Egger's
+  tryCatch({
+    test_output <- metabias(meta_results, method.bias = "linreg")
+    print(test_output)
+  }, error = function(e) {
+    cat("Error running Egger's test: Likely too few studies (k) for regression.")
+  })
+  
+  sink()
+
+### Duval & Tweedie's Trim-and-Fill Procedure ###
+  
+  tf_file <- file.path(results_dir, paste0("trimfill_test_overall.txt"))
+  
+  sink(tf_file)
+  cat("Duval & Tweedie's Trim-and-Fill Procedure \n")
+  cat("Overall \n\n")
+  
+  tf_result <- trimfill(meta_results, common = FALSE, random = TRUE)
+  print(tf_result)
+  
+  cat("\nComparison of Original vs. Adjusted Random Effects ")
+  cat("\nAdjusted SMD:", round(tf_result$TE.random, 3))
+  
+  sink()
+
+
+```
+
+#### Fail safe N
+<https://rdrr.io/cran/metafor/man/fsn.html>
+```{r}
+  yi_vector <- as.numeric(meta_results$TE)
+  vi_vector <- as.numeric(meta_results$seTE^2)
+  
+  fsn_results <- metafor::fsn(x = yi_vector, vi = vi_vector, type = "Rosenthal")
+
+  fsn_file <- file.path(results_dir, paste0("Fail_safe_N_test_overall.txt"))
+  
+  sink(fsn_file)
+  cat("Rosenthal's Fail-Safe N Analysis \n")
+  cat("Number of studies (k):", meta_results$k, "\n\n")
+  
+  print(fsn_results)
+  
+  threshold <- 5 * meta_results$k + 10
+  cat("\nInterpretation \n")
+  cat("Tolerance Level (5k + 10):", threshold, "\n")
+  if (fsn_results$fsnum > threshold) {
+    cat("Result is ROBUST: Fail-safe N is greater than the threshold.")
+  } else {
+    cat("Result is FRAGILE: Fail-safe N is less than the threshold.")
+  }
+  
+  sink()
+
+
+```
