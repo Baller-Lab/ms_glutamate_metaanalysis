@@ -61,13 +61,13 @@ Citations:
 ### Import Data
 ```{r}
 # All studies
-dataset_all <- read_excel(paste0(base_dir, "/Extraction/data/final_extraction_data_20260406.xlsx")) 
+dataset_all <- read_excel(paste0(base_dir, "/Extraction/data/msglu_metaanalysis_extracted_data.xlsx")) 
 
 # Only studies that report T-stats
-datasetT <- read_excel(paste0(base_dir, "/Extraction/data/final_extraction_data_20260406.xlsx"), 2) 
+datasetT <- read_excel(paste0(base_dir, "/Extraction/data/msglu_metaanalysis_extracted_data.xlsx"), 2) 
 
 # Only studies that report P-Values
-datasetP <- read_excel(paste0(base_dir, "/Extraction/data/final_extraction_data_20260406.xlsx"), 3) 
+datasetP <- read_excel(paste0(base_dir, "/Extraction/data/msglu_metaanalysis_extracted_data.xlsx"), 3) 
 
 ```
 
